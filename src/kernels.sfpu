@@ -1,0 +1,326 @@
+# SPDX-FileCopyrightText: (c) 2026 Tenstorrent USA, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+@sfpu()
+def sfpu_mvmul_fold_body():
+    a = sfpload(0)
+    b = sfpload(2)
+    c = sfpload(8)
+    d = sfpload(10)
+    a = sfpadd(a, c)
+    b = sfpadd(b, d)
+    sfpstore(a, 0)
+    sfpstore(b, 2)
+
+@sfpu(bits=('scale_bits',), outputs={'acc0': 4, 'acc1': 5})
+def sfpu_moe_reduce_first_body(scale_bits):
+    a = sfpload(0, fmt='bf16')
+    b = sfpload(2, fmt='bf16')
+    scale = sfploadi(scale_bits)
+    acc0 = sfpmul(a, scale)
+    acc1 = sfpmul(b, scale)
+    return acc0, acc1
+
+@sfpu(bits=('scale_bits',), inputs={'acc0': 4, 'acc1': 5},
+      outputs={'out0': 4, 'out1': 5})
+def sfpu_moe_reduce_next_body(scale_bits, acc0, acc1):
+    a = sfpload(0, fmt='bf16')
+    b = sfpload(2, fmt='bf16')
+    scale = sfploadi(scale_bits)
+    out0 = sfpmad(a, scale, acc0)
+    out1 = sfpmad(b, scale, acc1)
+    return out0, out1
+
+@sfpu(inputs={'acc0': 4, 'acc1': 5})
+def sfpu_moe_reduce_store_body(acc0, acc1):
+    sfpstore(acc0, 0)
+    sfpstore(acc1, 2)
+
+@sfpu(bits=('scale_bits',), outputs={'scale': 6})
+def sfpu_scale_weight_setup(scale_bits):
+    scale = sfploadi(scale_bits)
+    return scale
+
+@sfpu(replay=True, inputs={'scale': 6}, preserve=(6,))
+def sfpu_scale_weight_body(scale):
+    a = sfpload(0)
+    b = sfpload(2)
+    # Inputs and weights occupy the lower and upper halves of FP32 Dst.
+    c = sfpload(256)
+    d = sfpload(258)
+    a = sfpmul(a, scale)
+    b = sfpmul(b, scale)
+    a = sfpmul(a, c)
+    b = sfpmul(b, d)
+    sfpstore(a, 0)
+    sfpstore(b, 2, addrmod=1) # advance Dst RWC by four rows
+
+@sfpu(outputs={'e': 4, 'f': 5, 'g': 6, 'h': 7})
+def sfpu_rope_coefficients_body():
+    e = sfpload(256)
+    f = sfpload(258)
+    g = sfpload(260)
+    h = sfpload(262)
+    return e, f, g, h
+
+@sfpu(inputs={'e': 4, 'f': 5, 'g': 6, 'h': 7}, preserve=(4, 5, 6, 7))
+def sfpu_rope_body(e, f, g, h):
+    a = sfpload(0)
+    b = sfpload(2)
+    c = sfpload(256)
+    d = sfpload(258)
+    a = sfpmul(a, e)
+    b = sfpmul(b, f)
+    a = sfpmad(c, g, a)
+    b = sfpmad(d, h, b)
+    sfpstore(a, 0)
+    sfpstore(b, 2, addrmod=1)
+
+@sfpu(outputs={'acc0': 4, 'acc1': 5})
+def sfpu_squares_zero_body():
+    acc0 = ZERO
+    acc1 = ZERO
+    return acc0, acc1
+
+@sfpu(replay=True, inputs={'acc0': 4, 'acc1': 5}, outputs={'out0': 4, 'out1': 5})
+def sfpu_squares_body(acc0, acc1):
+    a = sfpload(0)
+    b = sfpload(2, addrmod=1)
+    out0 = sfpmad(a, a, acc0)
+    out1 = sfpmad(b, b, acc1)
+    return out0, out1
+
+@sfpu(inputs={'acc0': 4, 'acc1': 5, 'test': 6}, outputs={'out0': 4, 'out1': 5})
+def sfpu_squares_tail_body(acc0, acc1, test):
+    a = sfpload(0)
+    b = sfpload(2, addrmod=1)
+    with sfpiadd(test, 0, cc='gte0'):
+        a = ZERO
+        b = ZERO
+    out0 = sfpmad(a, a, acc0)
+    out1 = sfpmad(b, b, acc1)
+    return out0, out1
+
+@sfpu(outputs={'v0': 6, 'v1': 7})
+def sfpu_attention_load_value_body():
+    v0 = sfpload(32)
+    v1 = sfpload(34)
+    return v0, v1
+
+@sfpu(bits=('scale_bits',), outputs={'scale': 0})
+def sfpu_attention_scale_body(scale_bits):
+    scale = sfploadi(scale_bits)
+    return scale
+
+@sfpu(replay=True, inputs={'scale': 0, 'v0': 6, 'v1': 7}, preserve=(6, 7))
+def sfpu_attention_accumulate_body(scale, v0, v1):
+    # AddrMod1 advances Dst RWC by four rows; the caller resets it after its final head.
+    a = sfpload(0)
+    b = sfpload(2)
+    a = sfpmad(v0, scale, a)
+    b = sfpmad(v1, scale, b)
+    sfpstore(a, 0)
+    sfpstore(b, 2, addrmod=1)
+
+@sfpu(offsets=('key',), outputs={'k0': 6, 'k1': 7})
+def sfpu_attention_load_key_body(key):
+    # Each half reloads the key because the transpose clobbers all eight LRegs.
+    k0 = sfpload(key)
+    k1 = sfpload(key + 2)
+    return k0, k1
+
+@sfpu(templates=('query',), inputs={'k0': 6, 'k1': 7}, outputs={'sum': 4})
+def sfpu_attention_partial_sum_body(k0, k1):
+    q0 = sfpload(query, fmt='bf16')
+    q1 = sfpload(query + 2, fmt='bf16')
+    a = sfpmul(q0, k0)
+    q0 = sfpload(query + 4, fmt='bf16')
+    a = sfpmad(q1, k1, a)
+    b = sfpmul(q0, k0)
+    q1 = sfpload(query + 6, fmt='bf16')
+    b = sfpmad(q1, k1, b)
+    q0 = sfpload(query + 16, fmt='bf16')
+    q1 = sfpload(query + 18, fmt='bf16')
+    c = sfpmul(q0, k0)
+    q0 = sfpload(query + 20, fmt='bf16')
+    c = sfpmad(q1, k1, c)
+    d = sfpmul(q0, k0)
+    q1 = sfpload(query + 22, fmt='bf16')
+    d = sfpmad(q1, k1, d)
+    sum = attention_transpose_sum(a, b, c, d)
+    return sum
+
+@sfpu_helper()
+def attention_transpose_sum(a, b, c, d):
+    a, b, c, d = sfptransp(a, b, c, d)
+    ab = sfpadd(b, a)
+    cd = sfpadd(d, c)
+    sum = sfpadd(cd, ab)
+    return sum
+
+@sfpu(templates=('query',), inputs={'k0': 6, 'k1': 7}, outputs={'sum': 4})
+def sfpu_attention_partial_sum_pair_body(k0, k1):
+    q0 = sfpload(query, fmt='bf16')
+    q1 = sfpload(query + 2, fmt='bf16')
+    a = sfpmul(q0, k0)
+    q0 = sfpload(query + 4, fmt='bf16')
+    a = sfpmad(q1, k1, a)
+    b = sfpmul(q0, k0)
+    q1 = sfpload(query + 6, fmt='bf16')
+    b = sfpmad(q1, k1, b)
+    # Duplicate heads, not reduction terms; retain the original tree in each subvector.
+    sum = attention_transpose_sum(a, b, a, b)
+    return sum
+
+@sfpu(offsets=('row',), inputs={'even': 5, 'odd': 4}, outputs={'even': 5, 'odd': 4})
+def sfpu_attention_store_scores_body(row, even, odd):
+    odd = sfpmuli(odd, 0x3E00) # 1/sqrt(64)
+    even = sfpmuli(even, 0x3E00)
+    sfpstore(even, row)
+    sfpstore(odd, row + 2)
+    return even, odd
+
+@sfpu(templates=('offset',), bits=('scale_bits',))
+def sfpu_attention_normalize_body(scale_bits):
+    scale = sfploadi(scale_bits)
+    a = sfpload(offset)
+    b = sfpload(offset + 2)
+    a = sfpmul(a, scale)
+    b = sfpmul(b, scale)
+    sfpstore(a, offset)
+    sfpstore(b, offset + 2)
+
+# Sum each eight-lane subvector in the original rotate/add order.
+@sfpu_helper()
+def reduce_subvec_sum(x):
+    t = sfpshft2(x, mode='rotate')
+    x = sfpadd(t, x)
+    t = sfpshft2(x, mode='rotate')
+    t = sfpshft2(t, mode='rotate')
+    x = sfpadd(t, x)
+    t = sfpshft2(x, mode='rotate')
+    t = sfpshft2(t, mode='rotate')
+    t = sfpshft2(t, mode='rotate')
+    t = sfpshft2(t, mode='rotate')
+    x = sfpadd(t, x)
+    return x
+
+@sfpu(offsets=('row',), inputs={'sum': 4})
+def sfpu_attention_store_four_scores_body(sum, row):
+    sum = reduce_subvec_sum(sum)
+    sum = sfpmuli(sum, 0x3E00) # 1/sqrt(64)
+    sfpstore(sum, row)
+
+@sfpu(inputs={'acc0': 4, 'acc1': 5})
+def sfpu_squares_reduce_body(acc0, acc1):
+    setrwc(dst=0)
+    x = sfpadd(acc1, acc0)
+    # Replicate then transpose to expose each eight-lane row in a separate vector.
+    a, b, c, d = sfptransp(x, x, x, x)
+    x = sfpadd(b, a)
+    x = sfpadd(c, x)
+    x = sfpadd(d, x)
+    x = reduce_subvec_sum(x)
+    sfpstore(x, 0)
+
+@sfpu_helper()
+def rotate_pair(x, y):
+    a = sfpshft2(x, mode='rotate')
+    b = sfpshft2(y, mode='rotate')
+    return a, b
+
+@sfpu_helper()
+def reduce_subvec_sum_pair(x, y):
+    a, b = rotate_pair(x, y)
+    x = sfpadd(a, x)
+    y = sfpadd(b, y)
+    a, b = rotate_pair(x, y)
+    a, b = rotate_pair(a, b)
+    x = sfpadd(a, x)
+    y = sfpadd(b, y)
+    a, b = rotate_pair(x, y)
+    a, b = rotate_pair(a, b)
+    a, b = rotate_pair(a, b)
+    a, b = rotate_pair(a, b)
+    x = sfpadd(a, x)
+    y = sfpadd(b, y)
+    return x, y
+
+@sfpu(inputs={'x': 4, 'y': 5}, outputs={'x': 4, 'y': 5})
+def sfpu_reduce_subvec_sum_pair_body(x, y):
+    x, y = reduce_subvec_sum_pair(x, y)
+    return x, y
+
+@sfpu()
+def sfpu_attention_zero_body():
+    sfpstore(ZERO, 0)
+    sfpstore(ZERO, 2)
+    sfpstore(ZERO, 4)
+    sfpstore(ZERO, 6)
+    sfpstore(ZERO, 8)
+    sfpstore(ZERO, 10)
+    sfpstore(ZERO, 12)
+    sfpstore(ZERO, 14)
+    sfpstore(ZERO, 16)
+    sfpstore(ZERO, 18)
+    sfpstore(ZERO, 20)
+    sfpstore(ZERO, 22)
+    sfpstore(ZERO, 24)
+    sfpstore(ZERO, 26)
+    sfpstore(ZERO, 28)
+    sfpstore(ZERO, 30)
+
+# Nonpositive x. The integer predicate preserves the existing cutoff at x <= -20.
+# Entry contracts declare which broadcasts are available in constant registers.
+@sfpu_helper()
+def exp_negative(x):
+    result = ZERO
+    test = sfpadd(x, sfploadi(0x41A00000))
+    with sfpiadd(test, -1, cc='gte0'):
+        z = sfpmul(x, sfploadi(0x3FB8AA3B))
+        magic = sfploadi(0x4B400000)
+        rounded = sfpadd(z, magic)
+        n = sfpadd(rounded, magic, negate_b=True)
+        r = sfpadd(x, sfpmul(n, sfploadi(0x3F317218)), negate_b=True)
+        r2 = sfpmul(r, r)
+        p = sfpadd(r, sfploadi(0x3f800000))
+        p = sfpmad(r2, sfploadi(0x3F000000), p) # r^2 / 2
+        r3 = sfpmul(r, r2)
+        r4 = sfpmul(r2, r2)
+        p = sfpmad(r3, sfploadi(0x3E2AAAAB), p) # r^3 / 6
+        r5 = sfpmul(r, r4)
+        p = sfpmad(r4, sfploadi(0x3D2AAAAB), p) # r^4 / 24
+        p = sfpmad(r5, sfploadi(0x3C088889), p) # r^5 / 120
+        exponent = sfpiadd(rounded, 127)
+        scale = sfpsetexp(ZERO, exponent)
+        result = sfpmul(scale, p)
+    return result
+
+@sfpu(templates=('score_off',), offsets=('maximum_row', 'row'), addrmods=('addrmod',),
+      constants={11: 0x3E2AAAAB, 12: 0x3D2AAAAB, 13: 0x3FB8AA3B, 14: 0x3F317218}, outputs={'result': 7})
+def sfpu_attention_exp_half(maximum_row, row):
+    maximum_off = sub32(add32(maximum_row, score_off), row)
+    score = sfpload(score_off)
+    maximum = sfpload(maximum_off)
+    result = exp_negative(sfpadd(score, maximum, negate_b=True))
+    sfpstore(result, score_off, addrmod=addrmod)
+    return result
+
+@sfpu(templates=('offset',), constants={11: 0x40E00000, 12: 0xC0E00000, 13: 0x3FB8AA3B, 14: 0x3F317218})
+def sfpu_swiglu_body():
+    x = sfpmin(sfpload(16 + offset, fmt='bf16'), sfploadi(0x40E00000))
+    z = sfpmul(x, sfploadi(0x3FD9DB23))
+    e = exp_negative(sfpsetsgn(z, sign=1))
+    denominator = sfpadd(e, sfploadi(0x3f800000))
+    r = sfprecip(denominator)
+    correction = sfpmad(denominator, r, sfploadi(0x40000000), negate_product=True)
+    r = sfpmul(r, correction)
+    x = sfpmin(sfpload(16 + offset, fmt='bf16'), sfploadi(0x40E00000))
+    with sfpsetcc(x, cc='lt0'):
+        r = sfpmul(e, r)
+    up = sfpmin(sfpload(offset, fmt='bf16'), sfploadi(0x40E00000))
+    up = sfpmax(up, sfploadi(0xC0E00000))
+    up = sfpadd(up, sfploadi(0x3F800000))
+    result = sfpmul(x, r)
+    result = sfpmul(result, up)
+    sfpstore(sfpround(result, fmt='bf16', rounding='nearest'), offset, fmt='bf16')
