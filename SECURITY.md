@@ -1,53 +1,46 @@
 # Security Policy
 
-## Reporting Security Vulnerabilities
+## Reporting a Vulnerability
 
-**Please do not report security vulnerabilities through public GitHub issues.**
+If you discover a security vulnerability in this project, please report it responsibly using GitHub's private vulnerability reporting feature.
 
-We use GitHub's private vulnerability reporting feature to handle security issues. To report a security vulnerability:
+**Do not report security vulnerabilities through public GitHub issues.**
 
-1. Navigate to the [tt-lab repository](https://github.com/tenstorrent/tt-lab)
-2. Click on the **Security** tab
-3. Click **Report a vulnerability** to open the advisory form
-4. Fill out the form with details about the vulnerability
+### How to Report
 
-Alternatively, you can go directly to: https://github.com/tenstorrent/tt-lab/security/advisories/new
+1. Navigate to the **Security** tab of the [tt-lab repository](https://github.com/tenstorrent/tt-lab)
+2. Click **"Report a vulnerability"**
+3. Provide a detailed description of the vulnerability, including:
+   - Steps to reproduce the issue
+   - Potential impact
+   - Any suggested fixes (if applicable)
 
-Please include the following information in your report:
+You can also go directly to https://github.com/tenstorrent/tt-lab/security/advisories/new.
 
-* Type of issue (e.g., buffer overflow, memory corruption, etc.)
-* Full paths of source file(s) related to the manifestation of the issue
-* The location of the affected source code (tag/branch/commit or direct URL)
-* Any special configuration required to reproduce the issue
-* Step-by-step instructions to reproduce the issue
-* Proof-of-concept or exploit code (if possible)
-* Impact of the issue, including how an attacker might exploit the issue
+To help us triage your report quickly, please also include, where possible:
 
-This information will help us triage your report more quickly.
+- Type of issue (for example, buffer overflow or memory corruption)
+- Full paths of the source files related to the issue
+- Location of the affected source code (tag, branch, commit, or direct URL)
+- Any special configuration required to reproduce the issue
+- Proof-of-concept or exploit code
 
-## Response Process
+For detailed instructions on privately reporting a security vulnerability, see [GitHub's documentation](https://docs.github.com/en/code-security/how-tos/report-and-fix-vulnerabilities/report-a-vulnerability/privately-reporting-a-security-vulnerability).
 
-After you submit a report, the security team will:
+### Questions or Discussion
 
-1. Acknowledge receipt of your vulnerability report
-2. Assess the vulnerability and determine its impact
-3. Work on a fix for the issue
-4. Keep you informed of our progress through the private advisory
+If you have questions about the vulnerability or need to start a conversation about it, please contact **ospo@tenstorrent.com** directly.
 
-We aim to respond to security reports within 5 business days with an assessment and plan.
+## Our Security Process
 
-## Disclosure Policy
-
-We follow a coordinated disclosure policy. We will work with you to understand the scope
-of the vulnerability and develop a fix before any public disclosure. We appreciate your
-patience and cooperation in keeping our users safe.
+1. **Report**: Submit a vulnerability report through GitHub's Security tab
+2. **Acknowledgment**: Tenstorrent will respond within **5 business days**
+3. **Triage**: Our team will assess the issue and update its priority and risk level
+4. **Fix Development**: A fix will be developed in a private branch, with reporter feedback when possible
+5. **Disclosure**: A security advisory will be published once the fix is patched and merged to the main branch
 
 ## Supported Versions
 
-Security updates will be provided for the most recent release of tt-lab. We encourage all
-users to keep their installations up to date.
+Security updates are provided for the latest version of tt-lab on the `main` branch. We encourage all users to keep their installations up to date.
 
-## Comments on this Policy
-
-If you have suggestions on how this process could be improved, please open an issue
-or send an email to [opensource@tenstorrent.com](mailto:opensource@tenstorrent.com).
+Thank you for helping keep this project and our users safe!

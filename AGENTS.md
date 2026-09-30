@@ -1,4 +1,4 @@
-Goal: simple, readable `tt-lab` implementation for running gpt-oss-20b/120b MXFP4 GGUF files, with a narrow TT Blackhole backend for bringup and tensor experiments.
+Goal: simple, readable `tt-lab` implementation for running gpt-oss-20b/120b MXFP4 GGUF files, with a narrow TT Blackhole backend for bring-up and tensor experiments.
 
 Style: gnu++20, mostly C-like, Linux/x86_64 first, no threads. Intrinsics only for isolated measured hot kernels.
 

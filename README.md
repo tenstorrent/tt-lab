@@ -1,9 +1,9 @@
 # tt-lab
 
 `tt-lab` runs gpt-oss-20b and gpt-oss-120b on Tenstorrent Blackhole hardware and provides the tools
-to understand and improve their execution. It combines end-to-end inference, custom firmware,
-a small SFPU kernel compiler, a bit-accurate host-side device proxy, and CPU reference inference
-in one inspectable codebase.
+to understand and improve their execution. It combines end-to-end inference, custom firmware, a
+small compiler for SFPU (the Tensix Vector Unit) kernels, a
+bit-accurate host-side device proxy, and CPU reference inference in one inspectable codebase.
 
 The hardware path runs the transformer on Tensix tiles, including attention, expert matvecs,
 normalization, and activations. Four-chip execution uses direct PCIe peer-to-peer communication,
@@ -16,15 +16,18 @@ not host-mediated tensor exchange. The host handles tokenization and greedy toke
 
 Eight workers are only a fraction of a Blackhole chip's Tensix tiles. The goal is to make the
 mapping efficient and understandable, with explicit data movement and no framework or compute
-library between the model and the hardware. Each worker runs one BRISC firmware instance.
+library between the model and the hardware. Each worker runs one firmware instance on BRISC, one of
+the RISC-V cores in each Tensix tile.
 
 The same tool supports several development workflows:
 
-- **Run models:** load MXFP4 GGUF weights, create a hardware-layout `.ttq` sidecar, and generate text.
+- **Run models:** load MXFP4 (4-bit microscaling floating point) GGUF weights, create a
+  hardware-layout `.ttq` sidecar, and generate text.
 - **Check correctness:** compare every output logit from silicon or simulation bit-for-bit against
   the device proxy, independently of differences from CPU reference arithmetic.
 - **Study numerics:** compare CPU and proxy intermediate tensors, layer drift, and final logits.
-- **Tune kernels:** edit C++ firmware or SFPU DSL fragments and measure per-stage device cycles.
+- **Tune kernels:** edit C++ firmware or SFPU domain-specific language (DSL) fragments and measure
+  per-stage device cycles.
 - **Work without hardware:** use CPU inference and the device proxy, or a compatible `ttsim` build.
 
 Current scope is Linux/little-endian x86-64, the supported gpt-oss MXFP4 GGUF layouts, one sequence,
@@ -33,11 +36,13 @@ This is an inference and hardware experimentation project, not a production serv
 there is no multi-sequence batching or serving endpoint. The host inference code is single-threaded
 and uses no compute libraries; Python is needed for building, not for running the executable.
 
-## Building
+## Getting Started
 
-Build prerequisites are Python 3.12+, GCC with GNU++20 support, GNU binutils, and the standard
-Linux shell utilities. The executable has no Python runtime dependency. All executable builds,
-including CPU-only use, currently compile and embed the TT firmware and therefore require
+### Building
+
+Build prerequisites are Python 3.12+, GCC with GNU++20 support, GNU binutils, and the standard Linux
+shell utilities. The executable has no Python runtime dependency. All executable builds, including
+CPU-only use, currently compile and embed the Tenstorrent (TT) firmware and therefore require
 [SFPI](https://github.com/tenstorrent/sfpi); the tested version is 7.76.0.
 
 ```sh
@@ -53,7 +58,7 @@ Ubuntu 24.04's GCC 13 is tested; newer compilers can generate better AVX-512 cod
 firmware build expects SFPI under `~/sfpi-7.76.0` by default; set `SFPI_PATH` to override that
 location.
 
-## Models
+### Models
 
 `tt-lab` does not download models automatically. You give it a local `.gguf` file with
 `-m`.
@@ -96,9 +101,10 @@ _out/tt-lab inspect -m ~/models/gpt-oss-20b-MXFP4.gguf
 _out/tt-lab inspect -m ~/models/gpt-oss-120b-MXFP4.gguf
 ```
 
-## Running
+### Running
 
-On one Blackhole chip, after building and creating the sidecar described below:
+On one Blackhole chip, after building and creating the `.ttq` sidecar (see
+[Requant Sidecar](#requant-sidecar)):
 
 ```sh
 _out/tt-lab run -m ~/models/gpt-oss-20b-MXFP4.gguf \
@@ -114,8 +120,8 @@ For CPU reference inference, omit the device options:
 _out/tt-lab run -m ~/models/gpt-oss-20b-MXFP4.gguf -p "How do you like your steak?"
 ```
 
-Generation is greedy. By default, `tt-lab run` runs until EOS or until the remaining
-context is full. Use `-n N` to set a smaller output-token limit:
+Generation is greedy. By default, `tt-lab run` runs until the end-of-sequence (EOS) token or until
+the remaining context is full. Use `-n N` to set a smaller output-token limit:
 
 ```sh
 _out/tt-lab run -m ~/models/gpt-oss-20b-MXFP4.gguf \
@@ -132,6 +138,11 @@ To inspect raw tokenization:
 ```sh
 _out/tt-lab tokenize -m ~/models/gpt-oss-20b-MXFP4.gguf -p "Hello"
 ```
+
+The commands are `run`, `inspect`, `requant`, and `tokenize`. The common options also have long
+forms: `-m`/`--model`, `-p`/`--prompt`, `-o`/`--output` (`requant` only), and `-n`/`--n-predict`
+(also `--predict`; `run` only). `-h` or `--help` prints the usage summary. The hardware and
+simulator options are listed under [Backend Commands](#backend-commands).
 
 ## Requant Sidecar
 
@@ -156,16 +167,16 @@ runtime repacking in simulator/proxy modes.
 
 Current payload formats are:
 
-- Q8_0 matrix tensors converted to BF16 Tensix 16x16 tiles.
+- Q8_0 matrix tensors converted to BF16 (bfloat16) Tensix 16x16 tiles.
 - `token_embd.weight` converted to linear BF16.
 - F32 router weights converted to BF16 Tensix 16x16 tiles.
 - Other F32 tensors, biases, norms, attention sinks, and scalar tensors converted to
   linear BF16.
-- MXFP4 gate/up/down expert tensors stored only in BFP8 Tensix strips. Each strip is
-  a `2880x16` block, equivalent to `16x16x180`, with all 2880 shared exponent bytes first,
-  followed by the packed datum bytes. Each 16x16 tile is row-major: each exponent covers 16
-  consecutive input columns within one output row, matching the native MXFP4 axis. The proxy
-  reads these tiles transposed into SrcA order. BFP8 records have a `.bfp8` name suffix.
+- MXFP4 gate/up/down expert tensors stored only in BFP8 (8-bit block floating point) Tensix strips.
+  Each strip is a `2880x16` block, equivalent to `16x16x180`, with all 2880 shared exponent bytes
+  first, followed by the packed datum bytes. Each 16x16 tile is row-major: each exponent covers 16
+  consecutive input columns within one output row, matching the native MXFP4 axis. The proxy reads
+  these tiles transposed into SrcA order. BFP8 records have a `.bfp8` name suffix.
 
 The current backend uses BFP8 for all expert matrices, with no format-selection knob.
 Expert format ID 5 distinguishes the new axis from the old format ID 4; old sidecars must be
@@ -183,12 +194,14 @@ exponent and one smaller exponent by reconstructed squared error.
 
 Supported hardware execution:
 
-- gpt-oss-20b on one BH chip with `--tiles 1` or `--tiles 8` (default: one);
-- either model on four BH chips with `--tiles 32`, using PCIe peer-to-peer DMA (required for 120b);
+- gpt-oss-20b on one Blackhole chip with `--tiles 1` or `--tiles 8` (default: one);
+- either model on four Blackhole chips with `--tiles 32`, using PCIe peer-to-peer DMA (required for
+  120b);
 - shared C++20 BRISC firmware (`src/brisc.cpp`), with one BRISC per tile;
 - host tokenization;
 - one sequence, greedy generation;
-- sharded matvecs and attention, with local NOC all-gathers and cross-chip PCIe exchange.
+- sharded matvecs and attention, with local NOC (network-on-chip) all-gathers and cross-chip PCIe
+  exchange.
 
 Four-chip runs place each chip's workers in its active PCIe tile's physical column, using the
 chip's coordinate translation tables to account for harvesting. If that Tensix column is
@@ -198,7 +211,7 @@ and DRAM ownership stay unchanged. Single-chip runs retain their existing placem
 The simulator backend and host-side device proxy both require the offline requantized
 `.ttq` sidecar. `--sim`, `--device`, `--device-proxy`, and `--check` require `--ttq`.
 
-The simulator path loads active weight payloads into simulated BH DRAM once at startup; all
+The simulator path loads active weight payloads into simulated Blackhole DRAM once at startup; all
 device matvecs then stream weights from simulated DRAM rather than copying weights from the
 host on demand. The device-proxy path mmaps the same `.ttq` and runs the same device
 arithmetic model directly on the host, so it is the fast oracle for simulator/device
@@ -209,11 +222,11 @@ single-shard arithmetic; `--sim/--device --check` matches the selected mapping's
 reduction order (eight partial sums for `--tiles 8`, one full sum for `--tiles 1/32`).
 
 Use dedicated, idle devices: `--device` changes power state, resets worker RISCs, and overwrites
-device storage. Do not run it concurrently with another tt-lab instance or another hardware
-runtime such as TT-Metal. The program acquires exclusive ownership through KMD for each device
-and fails immediately if it is busy. A driver supporting `O_EXCL` device opens is required;
-startup verifies support rather than silently proceeding unlocked. Ownership lasts until the
-device file descriptors are released, including on process exit.
+device storage. Do not run it concurrently with another tt-lab instance or another hardware runtime
+such as TT-Metal. The program acquires exclusive ownership through the Tenstorrent kernel-mode
+driver (KMD) for each device and fails immediately if it is busy. A driver supporting `O_EXCL`
+device opens is required; startup verifies support rather than silently proceeding unlocked.
+Ownership lasts until the device file descriptors are released, including on process exit.
 
 ### Hardware Setup
 
@@ -224,10 +237,10 @@ running inference as root is not required on the tested setup. Containers and sa
 expose the device nodes and allow access to them.
 
 Device selection is currently automatic: numeric names under `/dev/tenstorrent` are sorted
-numerically, then the first one (`--tiles 1/8`) or first four (`--tiles 32`) are opened. There is
-no device-selection flag, and busy or unsupported devices are not skipped. Each selected device
-must be Blackhole. A numeric device ID is not necessarily a physical board number or a UMD chip ID.
-Check the mapping before running on a machine with other accelerators or users:
+numerically, then the first one (`--tiles 1/8`) or first four (`--tiles 32`) are opened. There is no
+device-selection flag, and busy or unsupported devices are not skipped. Each selected device must be
+Blackhole. A numeric device ID is not necessarily a physical board number or a UMD (user-mode
+driver) chip ID. Check the mapping before running on a machine with other accelerators or users:
 
 ```sh
 ls -l /dev/tenstorrent /dev/tenstorrent/by-id
@@ -237,9 +250,10 @@ tt-smi --offline -s --snapshot_no_tty
 ```
 
 These `tt-smi` commands were checked with version 6.1.0; older versions may expose different
-options. The listing associates PCI BDFs and board information with device nodes. Run management
-tools before inference, not concurrently: their open device handles can conflict with exclusive
-ownership. `tt-smi` is useful for setup and diagnostics but is not a runtime dependency of `tt-lab`.
+options. The listing associates PCI bus/device/function (BDF) addresses and board information with
+device nodes. Run management tools before inference, not concurrently: their open device handles can
+conflict with exclusive ownership. `tt-smi` is useful for setup and diagnostics but is not a runtime
+dependency of `tt-lab`.
 
 The driver must implement `O_EXCL` ownership, `PIN_PAGES`, and, for four chips, `MAP_PEER_BAR`.
 Exclusive-open support was added by KMD commit `3d5abc9f8a916bacc761a42cdd194e1ce0b3045c`.
@@ -257,12 +271,12 @@ For `cannot pin host buffer for NOC DMA`, inspect kernel driver diagnostics and 
 No preallocated hugepages are used by this implementation.
 
 Four-chip inference requires working PCIe peer-to-peer reads and writes between every pair of
-selected chips. It maps peer BAR0 through KMD and uses the returned DMA addresses directly;
-there is no Ethernet or host-copy fallback. The host PCIe routing, isolation policy, and IOMMU
-configuration must permit those transactions. Successful enumeration or BAR mapping alone is
-not an end-to-end P2P test. The four-chip `--check` command below exercises the actual path;
-arbitrary four-card host topologies have not been validated. Do not disable platform isolation
-features blindly to work around a failure.
+selected chips. It maps peer BAR0 (PCIe base address register 0) through KMD and uses the returned
+DMA addresses directly; there is no Ethernet or host-copy fallback. The host PCIe routing, isolation
+policy, and IOMMU configuration must permit those transactions. Successful enumeration or BAR
+mapping alone is not an end-to-end P2P test. The four-chip `--check` command below exercises the
+actual path; arbitrary four-card host topologies have not been validated. Do not disable platform
+isolation features blindly to work around a failure.
 
 The development setup observed on 2026-09-17 is below. These are tested versions, not established
 minimum requirements or a claim that every firmware/driver combination is interchangeable.
@@ -274,15 +288,15 @@ minimum requirements or a claim that every firmware/driver combination is interc
 | Kernel / KMD | `7.0.0-31-generic` / `2.10.1-pre` with exclusive-open support |
 | IOMMU | Translating DMA domains (`DMA-FQ`), not passthrough |
 | Firmware bundle | `19.4.1.0`, as reported by tt-smi on all four chips |
-| Firmware components | CM `0.26.1.0`, DM application `0.20.1.0`, GDDR `2.11` |
-| SFPI | `7.76.0`, compiled for `tt-bh`; see Building |
+| Firmware components | Chip management (CM) `0.26.1.0`, device management (DM) application `0.20.1.0`, GDDR `2.11` |
+| SFPI | `7.76.0`, compiled for `tt-bh`; see [Building](#building) |
 
-Allow roughly 34 GiB of disk for the 20b GGUF plus BFP8 TTQ, or 177 GiB for the 120b pair.
-Requant replacement temporarily needs another full TTQ's worth of space. Files are memory-mapped,
-not wholly pinned, but CPU/proxy runs and `--check` benefit from enough host RAM to cache both
-files, plus context-dependent KV caches and working buffers. Silicon-only inference does not
-require both files to remain resident after loading. The 256 GiB development host is not a
-measured minimum; no universal minimum host-RAM requirement has been established.
+Allow roughly 34 GiB of disk for the 20b GGUF plus BFP8 TTQ, or 177 GiB for the 120b pair. Requant
+replacement temporarily needs another full TTQ's worth of space. Files are memory-mapped, not wholly
+pinned, but CPU/proxy runs and `--check` benefit from enough host RAM to cache both files, plus
+context-dependent key/value (KV) caches and working buffers. Silicon-only inference does not require
+both files to remain resident after loading. The 256 GiB development host is not a measured minimum;
+no universal minimum host-RAM requirement has been established.
 
 ### Backend Commands
 
@@ -330,7 +344,7 @@ _out/tt-lab run -m ~/models/gpt-oss-20b-MXFP4.gguf \
     -p "Hi" --tiles 8 -n 32
 ```
 
-Supported BH-path options:
+Supported Blackhole-path options:
 
 - `--sim PATH`: load `libttsim.so` and run the BRISC/Tensix simulator path for generation.
 - `--device`: run generation on the first one or four enumerated `/dev/tenstorrent` devices.
@@ -340,7 +354,7 @@ Supported BH-path options:
   timings with `--sim` or `--device`, including `--check`. Stages include waits and overlap;
   they are not isolated kernel timings. Totals include prefill and decode. Device cycles use
   `WALL_CLOCK_0`; simulator cycles are not silicon performance predictions.
-- `--ttq PATH`: load the offline requantized tensor file. Required by all BH paths.
+- `--ttq PATH`: load the offline requantized tensor file. Required by all Blackhole paths.
 - `--device-proxy`: run the host-side bit-exact proxy for the current device arithmetic
   and `.ttq` layout for generation.
 - `--check`: validate the selected backend instead of generating text. With `--device-proxy`,
@@ -356,11 +370,11 @@ Supported BH-path options:
 
 ### Current Simulator/Device Dataflow
 
-At startup the host loads `libttsim.so` or opens the selected devices, configures tile
-L1/register windows and BAR4 DRAM windows, preloads active tensors, allocates KV/score scratch,
-and initializes descriptors and persistent firmware on each tile. Eight-tile placement pairs
-each tile with a distinct DRAM channel, on the same NOC row wherever possible. The allocator
-limits each channel to 4080 MiB and reports peak channel usage.
+At startup the host loads `libttsim.so` or opens the selected devices, configures tile L1/register
+windows (L1 is each tile's local SRAM) and BAR4 DRAM windows, preloads active tensors, allocates
+KV/score scratch, and initializes descriptors and persistent firmware on each tile. Eight-tile
+placement pairs each tile with a distinct DRAM channel, on the same NOC row wherever possible. The
+allocator limits each channel to 4080 MiB and reports peak channel usage.
 
 Logits are sent directly from tile L1 to host memory over PCIe, not staged through DRAM.
 Silicon requires KMD-pinned host memory on every participating chip; pinning failure aborts
@@ -416,7 +430,7 @@ Current attention mapping:
   it is not partitioned by token range. Even sliding-window layers allocate the requested token
   capacity. For 120b, uneven channel headroom can limit context before total free DRAM runs out.
 
-Current MoE mapping:
+Current mixture-of-experts (MoE) mapping:
 
 - Router weights use the same 2-phase BF16 matvec path as other BF16 matvecs.
 - Gate/up/down expert weights use the 1-phase BFP8 matvec path. All matvecs accumulate in FP32 Dst.
@@ -462,7 +476,7 @@ Current qualitative status:
 ### Performance Snapshot
 
 Recent short-context checks on the development machine, a TT QuietBox2 with a Ryzen 7 9700X
-host and four BH chips:
+host and four Blackhole chips:
 
 | Model | Mapping | Mean device command time |
 |---|---|---|
@@ -514,7 +528,7 @@ def add_rows():
 The compiler handles register allocation, immediate lowering, supported instruction hazards,
 and explicitly declared REPLAY bodies. It preserves instruction order, so kernel scheduling
 remains visible in the source. Register exhaustion is a compile error, not an implicit spill.
-The firmware still owns unpacking, packing, NoC transfers, configuration, and synchronization.
+The firmware still owns unpacking, packing, NOC transfers, configuration, and synchronization.
 
 The DSL is used by real model kernels, including RoPE, SwiGLU, RMSNorm, attention, and MoE
 reduction. Its purpose is to make low-level optimization easier to review without hiding the
@@ -522,8 +536,8 @@ hardware behind a general tensor framework.
 
 ## Tensor Dumps
 
-Pass `--dump-tensors DIRECTORY` to write intermediate tensors as raw, little-endian FP32
-files:
+Pass `--dump-tensors DIRECTORY` to write intermediate tensors from CPU inference as raw,
+little-endian FP32 files. It cannot be combined with `--check`, `--sim`, or `--device`:
 
 ```sh
 _out/tt-lab run -m ~/models/gpt-oss-20b-MXFP4.gguf \
@@ -568,17 +582,6 @@ _out/tt-lab run -m ~/models/gpt-oss-20b-MXFP4.gguf -p "Hello" -n 1
 _out/tt-lab run -m ~/models/gpt-oss-120b-MXFP4.gguf -p "Hello" -n 1
 ```
 
-## License and Security
-
-Project code is licensed under [Apache-2.0](LICENSE), except where individual files specify
-otherwise. `make.py` carries its MIT license. See also [NOTICE](NOTICE) and
-[LICENSE_understanding.txt](LICENSE_understanding.txt). Downloaded model weights are separate
-artifacts governed by their own licenses and terms.
-
-See the [Code of Conduct](CODE_OF_CONDUCT.md) and [Security Policy](SECURITY.md).
-Use trusted GGUF/TTQ inputs; this experimental runner has not undergone a dedicated
-malformed-model security audit. `--sim` loads and executes the supplied shared library.
-
 ## Project Direction
 
 `tt-lab` is meant to stay small enough that the important behavior is visible in source
@@ -590,3 +593,23 @@ The CPU path provides reference inference and a baseline for numerical compariso
 proxy is the exact reference for the TT simulator and silicon paths; CPU drift is tracked
 separately because TTQ tensor formats and Tensix/SFPU arithmetic intentionally differ from
 the classic CPU kernels.
+
+## Security
+
+See the [Security Policy](SECURITY.md) to report vulnerabilities. Use trusted GGUF/TTQ inputs;
+this experimental runner has not undergone a dedicated malformed-model security audit. `--sim`
+loads and executes the supplied shared library.
+
+## Contributing
+
+This project does not accept pull requests. Report bugs and send questions or suggestions through
+GitHub Issues. See [CONTRIBUTING.md](CONTRIBUTING.md) for details and the
+[Code of Conduct](CODE_OF_CONDUCT.md).
+
+## License
+
+- [LICENSE](LICENSE): Overall license for this project, except where specified (Apache-2.0).
+- `make.py`: MIT license, as stated in the file header.
+
+See also [NOTICE](NOTICE) and [LICENSE_understanding.txt](LICENSE_understanding.txt). Downloaded
+model weights are separate artifacts governed by their own licenses and terms.

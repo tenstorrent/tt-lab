@@ -2,10 +2,10 @@
 Thank you for your interest in contributing to the `tt-lab` project!
 
 ## Current Status
-This repository provides the filtered open-source source for `tt-lab`, licensed under Apache 2.0.
+This repository contains a filtered open-source export of `tt-lab`, licensed under Apache 2.0.
 
 ## Code of Conduct
-This project adheres to the Contributor Covenant [Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code. Please report unacceptable behavior to [opensource@tenstorrent.com](mailto:opensource@tenstorrent.com).
+This project adheres to the Contributor Covenant [Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code. Please report unacceptable behavior to [ospo@tenstorrent.com](mailto:ospo@tenstorrent.com).
 
 ## Security Issues
 If you discover a security vulnerability, please do **not** report it through public GitHub issues. Instead, please follow our [Security Policy](SECURITY.md) and report it privately through GitHub's security advisory feature.
@@ -20,10 +20,10 @@ We welcome and encourage community feedback through GitHub issues. Please use is
 - Provide feedback
 
 When filing an issue, please include:
-- Clear description of the problem or request
+- A clear description of the problem or request
 - Steps to reproduce (for bugs)
-- Expected vs actual behavior
-- System information and `tt-lab` version
+- Expected and actual behavior
+- System information and the `tt-lab` version (commit hash)
 
 Before filing a new issue, please search existing issues to see if your topic has already been discussed. This
 helps keep our issue tracker organized and prevents duplicate reports.
