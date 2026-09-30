@@ -28,7 +28,7 @@ The same tool supports several development workflows:
 - **Study numerics:** compare CPU and proxy intermediate tensors, layer drift, and final logits.
 - **Tune kernels:** edit C++ firmware or SFPU domain-specific language (DSL) fragments and measure
   per-stage device cycles.
-- **Work without hardware:** use CPU inference and the device proxy, or a compatible `ttsim` build.
+- **Work without hardware:** use CPU inference, the device proxy, or `ttsim`.
 
 Current scope is Linux/little-endian x86-64, the supported gpt-oss MXFP4 GGUF layouts, one sequence,
 and greedy generation. CPU prefill is batched; hardware prefill processes tokens serially.
@@ -447,12 +447,13 @@ Current mixture-of-experts (MoE) mapping:
 
 ### Simulator Compatibility
 
-The matvec kernels require broadcast-row MVMUL support in the development simulator. The local
-implementation models all four destination rows and reuses arithmetic for equal accumulators.
+The matvec kernels require SrcB broadcast MVMUL (`MVMUL` with `instr_mod19=1`). `ttsim` has
+implemented it since v1.10.10, modeling all four destination rows; older versions report
+`UnimplementedFunctionality`. Build `src/_out/release_bh/libttsim.so` for the one-chip mappings, or
+`src/_out/release_bh_x4/libttsim.so` for the four-chip mapping.
 
 The simulator's standard harvesting and PCIe topology need not match the physical machine;
-four-chip placement follows each backend's translation tables. These local simulator changes
-are not supplied by this repository. There is no host command queue: the
+four-chip placement follows each backend's translation tables. There is no host command queue: the
 host issues one token command and waits for completion from the participating tiles.
 
 ### Numerics Status
@@ -488,10 +489,10 @@ They measure device token commands, not end-to-end generation throughput, and ex
 loading and proxy checks. They are short-context sanity checks, not sustained-throughput or
 long-context benchmarks.
 
-These are development snapshots, not portable performance guarantees. Context length, compiler,
-host load, and local simulator changes matter. `--check` adds proxy execution outside the
-reported device/simulator command time. The printed `proxy logits total` measures only the
-final vocabulary projection and its norm, not the full proxy forward pass.
+These are development snapshots, not portable performance guarantees. Context length, compiler, and
+host load matter. `--check` adds proxy execution outside the reported device/simulator command time.
+The printed `proxy logits total` measures only the final vocabulary projection and its norm, not the
+full proxy forward pass.
 
 20b eight-tile startup loads about `22.3 GiB` of active tensors across eight DRAM channels, with
 peak usage around `2947 MiB` per channel. Recent preload times were about `2.6 s` on silicon
