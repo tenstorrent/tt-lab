@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <dirent.h>
 #include <dlfcn.h>
@@ -2260,6 +2261,42 @@ uint64_t pin_host_buffer(size_t chip, void *buffer, uint64_t bytes) {
     return pin.out.physical_address;
 }
 
+// x86-64 PCIe DMA snoops the CPU caches, so pinned ordinary memory is safe there. Elsewhere (e.g. the
+// SpacemiT K3, whose PCIe is DMA-non-coherent and may run without an IOMMU) take a KMD-allocated buffer
+// instead: dma_alloc_coherent memory is physically contiguous and mapped uncached on such hosts.
+// TT_LAB_HOST_DMA=pin or =alloc overrides the default.
+bool host_dma_uses_kmd_buffer() {
+    const char *mode = std::getenv("TT_LAB_HOST_DMA");
+    if (mode && std::string_view(mode) == "pin") {
+        return false;
+    }
+    if (mode && std::string_view(mode) == "alloc") {
+        return true;
+    }
+#if defined(__x86_64__)
+    return false;
+#else
+    return true;
+#endif
+}
+
+uint64_t allocate_host_dma_buffer(size_t chip, uint8_t index, uint64_t bytes, void **mapping) {
+    const int fd = current_runtime->devices[chip].fd;
+    tenstorrent_allocate_dma_buf alloc{};
+    alloc.in.requested_size = uint32_t(bytes);
+    alloc.in.buf_index = index;
+    if (bytes > UINT32_MAX || ioctl(fd, TENSTORRENT_IOCTL_ALLOCATE_DMA_BUF, &alloc) < 0) {
+        throw std::runtime_error("cannot allocate host DMA buffer: " + std::string(std::strerror(errno)));
+    }
+    void *p = mmap(nullptr, alloc.out.size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, off_t(alloc.out.mapping_offset));
+    if (p == MAP_FAILED) {
+        throw std::runtime_error("cannot map host DMA buffer: " + std::string(std::strerror(errno)));
+    }
+    require_direct_dma_range(alloc.out.physical_address, bytes);
+    *mapping = p;
+    return alloc.out.physical_address;
+}
+
 void enable_host_dma(SimModelState &state, TtMeshConfig mesh, bool is_silicon) {
     const uint64_t logits_bytes = align_u64(TT_GPT_OSS_VOCAB * sizeof(uint16_t), 4096);
     std::byte *embedding = nullptr;
@@ -2280,6 +2317,15 @@ void enable_host_dma(SimModelState &state, TtMeshConfig mesh, bool is_silicon) {
         current_runtime->sim_embedding = embedding;
         current_runtime->sim_embedding_bytes = embedding ? state.embeddings->size : 0;
         current_runtime->sim_logits = (std::byte *)state.logits_bf16;
+    }
+    if (is_silicon && host_dma_uses_kmd_buffer()) {
+        if (mesh.chip_count() > 1) {
+            throw std::runtime_error("KMD-allocated host DMA buffers support single-chip runs only");
+        }
+        void *mapping = nullptr;
+        state.logits_noc_address[0] = allocate_host_dma_buffer(0, 0, logits_bytes, &mapping);
+        state.logits_bf16 = (uint16_t *)mapping;
+        return;
     }
     for (size_t chip = 0; chip < mesh.chip_count(); ++chip) {
         state.logits_noc_address[chip] =
