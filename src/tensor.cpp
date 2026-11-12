@@ -10,6 +10,10 @@
 #include <string>
 #if defined(__x86_64__)
 #include <immintrin.h>
+// Build AVX-512 and baseline clones, dispatched at load time.
+#define TENSOR_CLONES [[gnu::target_clones("arch=x86-64-v4", "default")]]
+#else
+#define TENSOR_CLONES
 #endif
 
 namespace {
@@ -168,7 +172,7 @@ float mxfp4_scale(uint8_t exponent) {
     return mxfp4_scale_table.values[exponent];
 }
 
-[[gnu::target_clones("arch=x86-64-v4", "default")]]
+TENSOR_CLONES
 void load_token_embedding_q8_0(const GgufTensor &tensor, size_t row, float *output) {
     const size_t n = size_t(tensor.shape[0]);
     const size_t row_bytes = n / 32 * 34;
@@ -183,7 +187,7 @@ void load_token_embedding_q8_0(const GgufTensor &tensor, size_t row, float *outp
     }
 }
 
-[[gnu::target_clones("arch=x86-64-v4", "default")]]
+TENSOR_CLONES
 void matvec_add_f32(const GgufTensor &matrix, const GgufTensor &bias, const float *input, float *output) {
     const size_t columns = size_t(matrix.shape[0]);
     const size_t rows = size_t(matrix.shape[1]);
@@ -199,7 +203,7 @@ void matvec_add_f32(const GgufTensor &matrix, const GgufTensor &bias, const floa
     }
 }
 
-[[gnu::target_clones("arch=x86-64-v4", "default")]]
+TENSOR_CLONES
 void matvec_q8_0(const GgufTensor &matrix, const float *input, float *output) {
     const size_t columns = size_t(matrix.shape[0]);
     const size_t rows = size_t(matrix.shape[1]);
@@ -217,7 +221,7 @@ void matvec_q8_0(const GgufTensor &matrix, const float *input, float *output) {
     }
 }
 
-[[gnu::target_clones("arch=x86-64-v4", "default")]]
+TENSOR_CLONES
 void matvec_add_q8_0(const GgufTensor &matrix, const GgufTensor &bias, const float *input, float *output) {
     const size_t columns = size_t(matrix.shape[0]);
     const size_t rows = size_t(matrix.shape[1]);
@@ -303,7 +307,7 @@ void matvec_add_mxfp4_2880(const GgufTensor &matrix, const GgufTensor &bias, con
     }
 }
 
-[[gnu::target_clones("arch=x86-64-v4", "default")]]
+TENSOR_CLONES
 void transpose_selected(const GgufTensor &matrix, const float *input, const size_t *tokens, size_t selected_count,
                         float *transposed_input) {
     const size_t columns = size_t(matrix.shape[0]);
@@ -494,7 +498,7 @@ void matmul_add_mxfp4_selected_transposed(const GgufTensor &matrix, const GgufTe
     }
 }
 
-[[gnu::target_clones("arch=x86-64-v4", "default")]]
+TENSOR_CLONES
 void matmul_add_f32(const GgufTensor &matrix, const GgufTensor &bias, const float *input, size_t token_count,
                     float *output, float *workspace, float *transposed_input) {
     const size_t columns = size_t(matrix.shape[0]);
@@ -526,7 +530,7 @@ void matmul_add_f32(const GgufTensor &matrix, const GgufTensor &bias, const floa
     }
 }
 
-[[gnu::target_clones("arch=x86-64-v4", "default")]]
+TENSOR_CLONES
 void matmul_add_q8_0(const GgufTensor &matrix, const GgufTensor &bias, const float *input, size_t token_count,
                      float *output, float *workspace, float *transposed_input) {
     const size_t columns = size_t(matrix.shape[0]);
@@ -565,7 +569,7 @@ void matmul_add_q8_0(const GgufTensor &matrix, const GgufTensor &bias, const flo
     }
 }
 
-[[gnu::target_clones("arch=x86-64-v4", "default")]]
+TENSOR_CLONES
 void rms_norm(const float *input, const GgufTensor &weights, float epsilon, float *output) {
     const size_t n = size_t(weights.shape[0]);
     float sum = 0.0f;
