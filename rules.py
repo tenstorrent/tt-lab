@@ -27,11 +27,18 @@ def rules(ctx):
         o_files += [o_file]
 
     matvec_objects = []
-    for isa in ('v3', 'v4'):
-        obj = f'_out/tt_matvec_{isa}.o'
+    if ctx.host.arch == 'x86_64':
+        for isa in ('v3', 'v4'):
+            obj = f'_out/tt_matvec_{isa}.o'
+            ctx.rule(obj, 'src/tt_matvec.cpp',
+                     cmd=['g++', *compile_opts, f'-march=x86-64-{isa}', '-Wno-psabi', '-MMD',
+                          '-c', 'src/tt_matvec.cpp', '-o', obj], depfile=obj.replace('.o', '.d'))
+            matvec_objects.append(obj)
+    else:
+        obj = '_out/tt_matvec.o'
         ctx.rule(obj, 'src/tt_matvec.cpp',
-                 cmd=['g++', *compile_opts, f'-march=x86-64-{isa}', '-Wno-psabi', '-MMD',
-                      '-c', 'src/tt_matvec.cpp', '-o', obj], depfile=obj.replace('.o', '.d'))
+                 cmd=['g++', *compile_opts, '-Wno-psabi', '-MMD', '-c', 'src/tt_matvec.cpp', '-o', obj],
+                 depfile=obj.replace('.o', '.d'))
         matvec_objects.append(obj)
     o_files += matvec_objects
 
@@ -59,18 +66,23 @@ def rules(ctx):
         '-ffreestanding', '-fno-builtin', '-ffp-contract=fast',
         '-mcpu=tt-bh', '-march=rv32imf_zba_zbb_zicsr_zifencei', '-mabi=ilp32f',
     ]
-    ctx.rule('_out/kernels_sfpu.inc', ['src/kernels.sfpu', 'tools/sfpu.py'],
-             cmd=['python3', 'tools/sfpu.py', 'src/kernels.sfpu', '-o', '_out/kernels_sfpu.inc'])
-    ctx.rule('_out/brisc.elf', ['src/brisc_entry.S', 'src/brisc.cpp', 'src/brisc.ld', '_out/kernels_sfpu.inc'],
-             cmd=[sfpi_gxx, *sfpi_opts, '-I_out', '-MMD', '-MF', '_out/brisc.d', '-nostdlib',
-                  '-Wl,-T,src/brisc.ld', '-Wl,--no-warn-rwx-segments',
-                  '-o', '_out/brisc.elf', 'src/brisc_entry.S', 'src/brisc.cpp'],
-             depfile='_out/brisc.d')
-    ctx.rule('_out/brisc.bin', '_out/brisc.elf',
-             cmd=[sfpi_objcopy, '-O', 'binary', '_out/brisc.elf', '_out/brisc.bin'])
-    ctx.rule('_out/brisc.inc', '_out/brisc.bin',
-             cmd=['/bin/sh', '-c',
-                  "od -An -v -t x1 _out/brisc.bin | sed 's/[0-9a-f][0-9a-f]/0x&,/g' > _out/brisc.inc"])
+    if ctx.env.get('TT_LAB_PREBUILT_FW'):
+        sfpi_gxx = None
+    # Firmware is built with SFPI, which runs only on x86-64/aarch64 hosts. With TT_LAB_PREBUILT_FW=1,
+    # _out/brisc.inc built elsewhere is used as-is.
+    if sfpi_gxx is not None:
+        ctx.rule('_out/kernels_sfpu.inc', ['src/kernels.sfpu', 'tools/sfpu.py'],
+                 cmd=['python3', 'tools/sfpu.py', 'src/kernels.sfpu', '-o', '_out/kernels_sfpu.inc'])
+        ctx.rule('_out/brisc.elf', ['src/brisc_entry.S', 'src/brisc.cpp', 'src/brisc.ld', '_out/kernels_sfpu.inc'],
+                 cmd=[sfpi_gxx, *sfpi_opts, '-I_out', '-MMD', '-MF', '_out/brisc.d', '-nostdlib',
+                      '-Wl,-T,src/brisc.ld', '-Wl,--no-warn-rwx-segments',
+                      '-o', '_out/brisc.elf', 'src/brisc_entry.S', 'src/brisc.cpp'],
+                 depfile='_out/brisc.d')
+        ctx.rule('_out/brisc.bin', '_out/brisc.elf',
+                 cmd=[sfpi_objcopy, '-O', 'binary', '_out/brisc.elf', '_out/brisc.bin'])
+        ctx.rule('_out/brisc.inc', '_out/brisc.bin',
+                 cmd=['/bin/sh', '-c',
+                      "od -An -v -t x1 _out/brisc.bin | sed 's/[0-9a-f][0-9a-f]/0x&,/g' > _out/brisc.inc"])
 
     ctx.rule(':build', ['_out/tt-lab', '_out/test-core'])
 

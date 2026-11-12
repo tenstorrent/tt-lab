@@ -6,13 +6,17 @@
 
 #include <bit>
 #include <cstring>
+#if defined(__x86_64__)
 #include <immintrin.h>
+#endif
 
 // Compile this arithmetic together for each ISA so vector ABIs cannot cross targets.
 #if defined(__AVX512F__)
 #define MATVEC_TARGET [[gnu::target("arch=x86-64-v4")]]
-#else
+#elif defined(__x86_64__)
 #define MATVEC_TARGET [[gnu::target("default")]]
+#else
+#define MATVEC_TARGET
 #endif
 
 namespace {

@@ -26,7 +26,9 @@
 #include <dirent.h>
 #include <dlfcn.h>
 #include <fcntl.h>
+#if defined(__x86_64__)
 #include <immintrin.h>
+#endif
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -185,6 +187,19 @@ const TtFirmwareRuntime::ChipBars &chip_bars(size_t chip) {
     return current_runtime->bars[chip];
 }
 
+// Order write-combined MMIO stores before anything that follows (x86 SFENCE).
+inline void mmio_write_fence() {
+#if defined(__x86_64__)
+    _mm_sfence();
+#elif defined(__riscv)
+    __asm__ volatile("fence iorw, iorw" ::: "memory");
+#elif defined(__aarch64__)
+    __asm__ volatile("dmb oshst" ::: "memory");
+#else
+#error "mmio_write_fence: unsupported host architecture"
+#endif
+}
+
 void copy_from_mmio_scalar(void *dst, const volatile uint8_t *src, uint32_t size) {
     if ((((uintptr_t)dst | (uintptr_t)src | size) & 3u) == 0) {
         auto *d = (uint32_t *)dst;
@@ -230,11 +245,22 @@ void copy_to_mmio_wc(volatile uint8_t *dst, const void *src, uint32_t size) {
     }
     if (((uintptr_t)dst & 31u) == 0 && size >= 32) {
         const uint32_t vectors = size / 32;
+#if defined(__x86_64__)
         volatile auto *d = (volatile __m256i *)dst;
         const auto *s = (const __m256i *)src;
         for (uint32_t i = 0; i < vectors; ++i) {
             d[i] = _mm256_loadu_si256(s + i);
         }
+#else
+        // 64-bit stores into the write-combining mapping; memcpy keeps unaligned source loads defined.
+        volatile auto *d = (volatile uint64_t *)dst;
+        const auto *s = (const uint8_t *)src;
+        for (uint32_t i = 0; i < vectors * 4; ++i) {
+            uint64_t word;
+            std::memcpy(&word, s + size_t(i) * 8, sizeof(word));
+            d[i] = word;
+        }
+#endif
         const uint32_t bytes = vectors * 32;
         dst += bytes;
         src = (const uint8_t *)src + bytes;
@@ -281,7 +307,7 @@ void silicon_pci_mem_wr_bytes(uint64_t paddr, const void *src, uint32_t size) {
     } else {
         copy_to_mmio_scalar(target.ptr, src, size);
     }
-    _mm_sfence();
+    mmio_write_fence();
 }
 
 void silicon_clock(uint32_t) {}

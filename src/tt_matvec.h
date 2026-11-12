@@ -8,6 +8,7 @@
 
 // Only scalar/pointer arguments cross the v3/v4 boundary; vector types stay private.
 // Accumulate into caller-initialized chains in internal Dst encoding. BF16 k_tiles is a multiple of four.
+#if defined(__x86_64__)
 [[gnu::target("default")]]
 void tt_matvec_bf16(const uint8_t *tiles, const uint32_t *b_value_rows, size_t k_tiles, uint32_t chains[2][16]);
 [[gnu::target("arch=x86-64-v4")]]
@@ -17,6 +18,11 @@ void tt_matvec_bf16(const uint8_t *tiles, const uint32_t *b_value_rows, size_t k
 void tt_matvec_bfp8(const uint8_t *strip, const uint32_t *b_value_rows, uint32_t chains[2][16]);
 [[gnu::target("arch=x86-64-v4")]]
 void tt_matvec_bfp8(const uint8_t *strip, const uint32_t *b_value_rows, uint32_t chains[2][16]);
+#else
+// Non-x86 hosts build one generic object; there is no ISA dispatch.
+void tt_matvec_bf16(const uint8_t *tiles, const uint32_t *b_value_rows, size_t k_tiles, uint32_t chains[2][16]);
+void tt_matvec_bfp8(const uint8_t *strip, const uint32_t *b_value_rows, uint32_t chains[2][16]);
+#endif
 
 inline uint16_t dst_decode_bf16_proxy(uint16_t x) {
     const uint16_t e = x & 255;
