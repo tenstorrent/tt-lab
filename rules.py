@@ -66,11 +66,13 @@ def rules(ctx):
         '-ffreestanding', '-fno-builtin', '-ffp-contract=fast',
         '-mcpu=tt-bh', '-march=rv32imf_zba_zbb_zicsr_zifencei', '-mabi=ilp32f',
     ]
-    if ctx.env.get('TT_LAB_PREBUILT_FW'):
-        sfpi_gxx = None
-    # Firmware is built with SFPI, which runs only on x86-64/aarch64 hosts. With TT_LAB_PREBUILT_FW=1,
-    # _out/brisc.inc built elsewhere is used as-is.
-    if sfpi_gxx is not None:
+    # Firmware is built with SFPI, which runs only on x86-64/aarch64 hosts. On other hosts, build it
+    # elsewhere and pass `--env TT_LAB_PREBUILT_FW=<dir containing brisc.inc>`.
+    prebuilt_fw = ctx.env.get('TT_LAB_PREBUILT_FW')
+    if prebuilt_fw:
+        prebuilt_inc = f'{ctx.path.expanduser(prebuilt_fw)}/brisc.inc'
+        ctx.rule('_out/brisc.inc', prebuilt_inc, cmd=['cp', prebuilt_inc, '_out/brisc.inc'])
+    else:
         ctx.rule('_out/kernels_sfpu.inc', ['src/kernels.sfpu', 'tools/sfpu.py'],
                  cmd=['python3', 'tools/sfpu.py', 'src/kernels.sfpu', '-o', '_out/kernels_sfpu.inc'])
         ctx.rule('_out/brisc.elf', ['src/brisc_entry.S', 'src/brisc.cpp', 'src/brisc.ld', '_out/kernels_sfpu.inc'],
