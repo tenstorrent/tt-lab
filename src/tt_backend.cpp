@@ -2265,18 +2265,52 @@ uint64_t pin_host_buffer(size_t chip, void *buffer, uint64_t bytes) {
 // SpacemiT K3, whose PCIe is DMA-non-coherent and may run without an IOMMU) take a KMD-allocated buffer
 // instead: dma_alloc_coherent memory is physically contiguous and mapped uncached on such hosts.
 // TT_LAB_HOST_DMA=pin or =alloc overrides the default.
-bool host_dma_uses_kmd_buffer() {
+enum class HostDmaMode { pin, alloc, pin_cmo };
+
+// pin:     pinned ordinary memory; correct only where PCIe DMA snoops the CPU caches (x86-64).
+// alloc:   KMD dma_alloc_coherent buffer; correct everywhere, but uncached on non-coherent hosts, so
+//          host reads of the logits are slow (~0.6 ms/token on SpacemiT K3).
+// pin_cmo: cached, physically contiguous 2 MiB hugepage pinned with PIN_PAGES, with explicit Zicbom
+//          cache maintenance around device writes. RISC-V default; falls back to alloc if no hugepage.
+// TT_LAB_HOST_DMA=pin|alloc|pin-cmo overrides the per-arch default.
+HostDmaMode host_dma_mode() {
     const char *mode = std::getenv("TT_LAB_HOST_DMA");
     if (mode && std::string_view(mode) == "pin") {
-        return false;
+        return HostDmaMode::pin;
     }
     if (mode && std::string_view(mode) == "alloc") {
-        return true;
+        return HostDmaMode::alloc;
+    }
+    if (mode && std::string_view(mode) == "pin-cmo") {
+        return HostDmaMode::pin_cmo;
     }
 #if defined(__x86_64__)
-    return false;
+    return HostDmaMode::pin;
+#elif defined(__riscv)
+    return HostDmaMode::pin_cmo;
 #else
-    return true;
+    return HostDmaMode::alloc;
+#endif
+}
+
+bool host_dma_needs_cmo = false;
+
+// Write back and invalidate [p, p + bytes) so the next CPU read sees what the device wrote, and no
+// dirty line can later overwrite device data. Zicbom block size is 64 bytes on SpacemiT X100.
+void host_dma_flush(const void *p, size_t bytes) {
+#if defined(__riscv)
+    constexpr uintptr_t block = 64;
+    uintptr_t a = uintptr_t(p) & ~(block - 1);
+    const uintptr_t end = uintptr_t(p) + bytes;
+    __asm__ volatile("fence rw, rw" ::: "memory");
+    for (; a < end; a += block) {
+        __asm__ volatile(".option push\n.option arch, +zicbom\ncbo.flush (%0)\n.option pop" ::"r"(a) : "memory");
+    }
+    __asm__ volatile("fence rw, rw" ::: "memory");
+#else
+    (void)p;
+    (void)bytes;
+    throw std::runtime_error("TT_LAB_HOST_DMA=pin-cmo needs cache-maintenance support for this architecture");
 #endif
 }
 
@@ -2318,10 +2352,25 @@ void enable_host_dma(SimModelState &state, TtMeshConfig mesh, bool is_silicon) {
         current_runtime->sim_embedding_bytes = embedding ? state.embeddings->size : 0;
         current_runtime->sim_logits = (std::byte *)state.logits_bf16;
     }
-    if (is_silicon && host_dma_uses_kmd_buffer()) {
-        if (mesh.chip_count() > 1) {
-            throw std::runtime_error("KMD-allocated host DMA buffers support single-chip runs only");
+    HostDmaMode mode = is_silicon ? host_dma_mode() : HostDmaMode::pin;
+    if (mode != HostDmaMode::pin && mesh.chip_count() > 1) {
+        throw std::runtime_error("TT_LAB_HOST_DMA alloc/pin-cmo support single-chip runs only");
+    }
+    if (mode == HostDmaMode::pin_cmo) {
+        void *p = mmap(nullptr, 2u << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+        if (p == MAP_FAILED) {
+            std::fprintf(stderr, "host DMA: no 2 MiB hugepage (%s); using uncached KMD buffer\n", std::strerror(errno));
+            mode = HostDmaMode::alloc;
+        } else {
+            std::memset(p, 0, logits_bytes);
+            host_dma_flush(p, logits_bytes);  // no dirty lines may be written back over device data later
+            state.logits_bf16 = (uint16_t *)p;
+            state.logits_noc_address[0] = pin_host_buffer(0, p, logits_bytes);
+            host_dma_needs_cmo = true;
+            return;
         }
+    }
+    if (mode == HostDmaMode::alloc) {
         void *mapping = nullptr;
         state.logits_noc_address[0] = allocate_host_dma_buffer(0, 0, logits_bytes, &mapping);
         state.logits_bf16 = (uint16_t *)mapping;
@@ -2403,6 +2452,9 @@ void device_token(TtSimApi &api, TtMeshConfig mesh, SimModelState &state, int32_
     issue_brisc_command(api, mesh, 400000000u * (uint32_t(layer_count) + 1u), is_silicon ? 10.0 : 0.0);
     const auto command_end = profile_time();
     if (compute_logits) {
+        if (host_dma_needs_cmo) {
+            host_dma_flush(state.logits_bf16, TT_GPT_OSS_VOCAB * sizeof(uint16_t));
+        }
         for (size_t i = 0; i < TT_GPT_OSS_VOCAB; ++i) {
             state.logits[i] = bf16_to_fp32(state.logits_bf16[i]);
         }
@@ -3024,18 +3076,6 @@ void init_sim_state(const GgufFile &file, const TtqFile &requant, size_t token_c
     /* Cover both the aligned start and the page-rounded pinning range. */
     state.logits_storage.resize((align_u64(TT_GPT_OSS_VOCAB * sizeof(uint16_t), 4096) + 4096) / sizeof(uint16_t));
     state.logits_bf16 = (uint16_t *)align_u64(uint64_t(uintptr_t(state.logits_storage.data())), 4096);
-    // Diagnostic: TT_LAB_LOGITS_HUGEPAGE=1 puts the logits in one cached, physically contiguous 2 MiB
-    // hugepage so PIN_PAGES works without an IOMMU. Used with TT_LAB_HOST_DMA=pin to test whether
-    // device writes to host memory are coherent with the CPU cache on a given host.
-    if (const char *hp = std::getenv("TT_LAB_LOGITS_HUGEPAGE"); hp && std::string_view(hp) == "1") {
-        void *p = mmap(nullptr, 2u << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
-        if (p == MAP_FAILED) {
-            throw std::runtime_error("TT_LAB_LOGITS_HUGEPAGE: no 2 MiB hugepage available: " +
-                                     std::string(std::strerror(errno)));
-        }
-        std::memset(p, 0xA5, 2u << 20);
-        state.logits_bf16 = (uint16_t *)p;
-    }
     if (host_kv_cache) {
         state.attention_scores.resize(token_count * (TT_GPT_OSS_QUERY_HEADS / TT_GPT_OSS_KV_HEADS));
     }
