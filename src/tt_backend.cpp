@@ -3024,6 +3024,18 @@ void init_sim_state(const GgufFile &file, const TtqFile &requant, size_t token_c
     /* Cover both the aligned start and the page-rounded pinning range. */
     state.logits_storage.resize((align_u64(TT_GPT_OSS_VOCAB * sizeof(uint16_t), 4096) + 4096) / sizeof(uint16_t));
     state.logits_bf16 = (uint16_t *)align_u64(uint64_t(uintptr_t(state.logits_storage.data())), 4096);
+    // Diagnostic: TT_LAB_LOGITS_HUGEPAGE=1 puts the logits in one cached, physically contiguous 2 MiB
+    // hugepage so PIN_PAGES works without an IOMMU. Used with TT_LAB_HOST_DMA=pin to test whether
+    // device writes to host memory are coherent with the CPU cache on a given host.
+    if (const char *hp = std::getenv("TT_LAB_LOGITS_HUGEPAGE"); hp && std::string_view(hp) == "1") {
+        void *p = mmap(nullptr, 2u << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+        if (p == MAP_FAILED) {
+            throw std::runtime_error("TT_LAB_LOGITS_HUGEPAGE: no 2 MiB hugepage available: " +
+                                     std::string(std::strerror(errno)));
+        }
+        std::memset(p, 0xA5, 2u << 20);
+        state.logits_bf16 = (uint16_t *)p;
+    }
     if (host_kv_cache) {
         state.attention_scores.resize(token_count * (TT_GPT_OSS_QUERY_HEADS / TT_GPT_OSS_KV_HEADS));
     }
