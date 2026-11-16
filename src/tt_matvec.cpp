@@ -254,8 +254,16 @@ inline void mvmul_tile_add_16(const uint8_t *tile, const uint32_t *b_values, uin
 
 } // namespace
 
+#if defined(__riscv_vector)
+// On RISC-V the generic bodies stay available (tests, TT_LAB_MATVEC=generic) and the public entry
+// points dispatch to the RVV kernels below.
+#define MATVEC_GENERIC_NAME(name) name##_generic
+#else
+#define MATVEC_GENERIC_NAME(name) name
+#endif
+
 MATVEC_TARGET
-void tt_matvec_bf16(const uint8_t *tiles, const uint32_t *b_value_rows, size_t k_tiles, uint32_t chains[2][16]) {
+void MATVEC_GENERIC_NAME(tt_matvec_bf16)(const uint8_t *tiles, const uint32_t *b_value_rows, size_t k_tiles, uint32_t chains[2][16]) {
     // Each inner64 group runs all four tiles in phase 0, then all four in phase 1.
     for (size_t base = 0; base < k_tiles; base += 4) {
         for (size_t k = base; k < base + 4; ++k) {
@@ -270,7 +278,7 @@ void tt_matvec_bf16(const uint8_t *tiles, const uint32_t *b_value_rows, size_t k
 }
 
 MATVEC_TARGET
-void tt_matvec_bfp8(const uint8_t *strip, const uint32_t *b_value_rows, uint32_t chains[2][16]) {
+void MATVEC_GENERIC_NAME(tt_matvec_bfp8)(const uint8_t *strip, const uint32_t *b_value_rows, uint32_t chains[2][16]) {
     uint8_t tile[TT_MVMUL_BFP8_TILE_EXP_BYTES + TT_MVMUL_BFP8_TILE_DATUM_BYTES];
 
     for (size_t k = 0; k < TT_MVMUL_K_TILES; ++k) {
@@ -283,3 +291,110 @@ void tt_matvec_bfp8(const uint8_t *strip, const uint32_t *b_value_rows, uint32_t
         mvmul_tile_add_16<0, 6>(tile, b_values, chains[k % 2]);
     }
 }
+
+#if defined(__riscv_vector)
+#include <riscv_vector.h>
+
+#include <cstdlib>
+#include <string_view>
+
+// 16 x u32 lanes need 512 bits: LMUL=4 works on any VLEN >= 128, LMUL=2 needs VLEN >= 256.
+#define RVV_NS rvv_m4
+#define RVV_L m4
+#define RVV_L8 m1
+#define RVV_L16 m2
+#define RVV_B vbool8_t
+#include "tt_matvec_rvv.inc"
+#undef RVV_NS
+#undef RVV_L
+#undef RVV_L8
+#undef RVV_L16
+#undef RVV_B
+
+#define RVV_NS rvv_m2
+#define RVV_L m2
+#define RVV_L8 mf2
+#define RVV_L16 m1
+#define RVV_B vbool16_t
+#include "tt_matvec_rvv.inc"
+#undef RVV_NS
+#undef RVV_L
+#undef RVV_L8
+#undef RVV_L16
+#undef RVV_B
+
+namespace {
+
+enum class MatvecKernel { generic, rvv_m4, rvv_m2 };
+
+MatvecKernel select_matvec_kernel() {
+    if (const char *env = std::getenv("TT_LAB_MATVEC")) {
+        const std::string_view name(env);
+        if (name == "generic") {
+            return MatvecKernel::generic;
+        }
+        if (name == "rvv-m4") {
+            return MatvecKernel::rvv_m4;
+        }
+    }
+    return __riscv_vlenb() >= 32 ? MatvecKernel::rvv_m2 : MatvecKernel::rvv_m4;
+}
+
+MatvecKernel matvec_kernel() {
+    static const MatvecKernel kernel = select_matvec_kernel();
+    return kernel;
+}
+
+} // namespace
+
+void tt_matvec_bf16_rvv(const uint8_t *tiles, const uint32_t *b_value_rows, size_t k_tiles, uint32_t chains[2][16],
+                        int lmul) {
+    if (lmul == 2) {
+        rvv_m2::matvec_bf16(tiles, b_value_rows, k_tiles, chains);
+    } else {
+        rvv_m4::matvec_bf16(tiles, b_value_rows, k_tiles, chains);
+    }
+}
+
+void tt_matvec_bfp8_rvv(const uint8_t *strip, const uint32_t *b_value_rows, uint32_t chains[2][16], int lmul) {
+    if (lmul == 2) {
+        rvv_m2::matvec_bfp8(strip, b_value_rows, chains);
+    } else {
+        rvv_m4::matvec_bfp8(strip, b_value_rows, chains);
+    }
+}
+
+void tt_matvec_bf16(const uint8_t *tiles, const uint32_t *b_value_rows, size_t k_tiles, uint32_t chains[2][16]) {
+    switch (matvec_kernel()) {
+    case MatvecKernel::generic:
+        return tt_matvec_bf16_generic(tiles, b_value_rows, k_tiles, chains);
+    case MatvecKernel::rvv_m4:
+        return rvv_m4::matvec_bf16(tiles, b_value_rows, k_tiles, chains);
+    case MatvecKernel::rvv_m2:
+        return rvv_m2::matvec_bf16(tiles, b_value_rows, k_tiles, chains);
+    }
+}
+
+void tt_matvec_bfp8(const uint8_t *strip, const uint32_t *b_value_rows, uint32_t chains[2][16]) {
+    switch (matvec_kernel()) {
+    case MatvecKernel::generic:
+        return tt_matvec_bfp8_generic(strip, b_value_rows, chains);
+    case MatvecKernel::rvv_m4:
+        return rvv_m4::matvec_bfp8(strip, b_value_rows, chains);
+    case MatvecKernel::rvv_m2:
+        return rvv_m2::matvec_bfp8(strip, b_value_rows, chains);
+    }
+}
+
+const char *tt_matvec_kernel_name() {
+    switch (matvec_kernel()) {
+    case MatvecKernel::generic:
+        return "generic";
+    case MatvecKernel::rvv_m4:
+        return "rvv-m4";
+    case MatvecKernel::rvv_m2:
+        return "rvv-m2";
+    }
+    return "?";
+}
+#endif

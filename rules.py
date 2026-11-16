@@ -60,6 +60,13 @@ def rules(ctx):
     ctx.rule('_out/test-host-dispatch', dispatch_objects,
              cmd=['g++', *compile_opts, *dispatch_objects, '-o', '_out/test-host-dispatch'])
 
+    ctx.rule('_out/matvec_bench.o', 'tests/matvec_bench.cpp',
+             cmd=['g++', *compile_opts, '-Isrc', '-MMD', '-c', 'tests/matvec_bench.cpp',
+                  '-o', '_out/matvec_bench.o'], depfile='_out/matvec_bench.d')
+    bench_objects = ['_out/matvec_bench.o', '_out/tensor.o', *matvec_objects]
+    ctx.rule('_out/matvec-bench', bench_objects,
+             cmd=['g++', *compile_opts, *bench_objects, '-o', '_out/matvec-bench'])
+
     sfpi_opts = [
         '-O2', '-std=gnu++20', '-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter',
         '-fno-exceptions', '-fno-rtti', '-fno-threadsafe-statics',
@@ -105,6 +112,11 @@ def rules(ctx):
     ctx.rule('_out/host-dispatch-test.stamp', '_out/test-host-dispatch',
              cmd=['/bin/sh', '-c', '_out/test-host-dispatch && touch _out/host-dispatch-test.stamp'],
              allow_output=True)
-    ctx.rule(':test', ['_out/core-test.stamp', '_out/sfpu-test.stamp', '_out/router-test.stamp',
-                       '_out/requant-test.stamp', '_out/host-dispatch-test.stamp'])
+    ctx.rule('_out/matvec-test.stamp', '_out/matvec-bench',
+             cmd=['/bin/sh', '-c', '_out/matvec-bench 0 && touch _out/matvec-test.stamp'], allow_output=True)
+    test_stamps = ['_out/core-test.stamp', '_out/sfpu-test.stamp', '_out/router-test.stamp',
+                   '_out/requant-test.stamp', '_out/matvec-test.stamp']
+    if ctx.host.arch == 'x86_64':
+        test_stamps.append('_out/host-dispatch-test.stamp')  # exercises the x86 v3/v4 multiversioned symbols
+    ctx.rule(':test', test_stamps)
     ctx.rule(':test-model', [':test', '_out/model-test.stamp'])

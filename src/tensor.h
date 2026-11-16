@@ -50,3 +50,9 @@ void matmul_add_mxfp4_selected_transposed(const GgufTensor &matrix, const GgufTe
                                           const float *transposed_input, const size_t *tokens, size_t selected_count,
                                           float *output, float *workspace, size_t expert = 0);
 void rms_norm(const float *input, const GgufTensor &weights, float epsilon, float *output);
+#if defined(__riscv_vector)
+// Individual bodies on RVV hosts, for tests and benchmarks (lmul 2 requires VLEN >= 256).
+void matvec_q8_0_generic(const GgufTensor &matrix, const float *input, float *output);
+void matvec_add_q8_0_generic(const GgufTensor &matrix, const GgufTensor &bias, const float *input, float *output);
+void matvec_q8_0_rvv(const GgufTensor &matrix, const GgufTensor *bias, const float *input, float *output, int lmul);
+#endif

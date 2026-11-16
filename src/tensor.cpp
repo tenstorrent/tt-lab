@@ -15,6 +15,13 @@
 #else
 #define TENSOR_CLONES
 #endif
+#if defined(__riscv_vector)
+// RVV hosts keep the generic bodies under *_generic (tests, TT_LAB_MATVEC=generic) and dispatch to
+// the RVV bodies at the end of this file.
+#define TENSOR_GENERIC_NAME(name) name##_generic
+#else
+#define TENSOR_GENERIC_NAME(name) name
+#endif
 
 namespace {
 
@@ -204,7 +211,7 @@ void matvec_add_f32(const GgufTensor &matrix, const GgufTensor &bias, const floa
 }
 
 TENSOR_CLONES
-void matvec_q8_0(const GgufTensor &matrix, const float *input, float *output) {
+void TENSOR_GENERIC_NAME(matvec_q8_0)(const GgufTensor &matrix, const float *input, float *output) {
     const size_t columns = size_t(matrix.shape[0]);
     const size_t rows = size_t(matrix.shape[1]);
     const size_t row_bytes = columns / 32 * 34;
@@ -222,7 +229,8 @@ void matvec_q8_0(const GgufTensor &matrix, const float *input, float *output) {
 }
 
 TENSOR_CLONES
-void matvec_add_q8_0(const GgufTensor &matrix, const GgufTensor &bias, const float *input, float *output) {
+void TENSOR_GENERIC_NAME(matvec_add_q8_0)(const GgufTensor &matrix, const GgufTensor &bias, const float *input,
+                                          float *output) {
     const size_t columns = size_t(matrix.shape[0]);
     const size_t rows = size_t(matrix.shape[1]);
     const size_t row_bytes = columns / 32 * 34;
@@ -582,3 +590,77 @@ void rms_norm(const float *input, const GgufTensor &weights, float epsilon, floa
         output[i] = input[i] * scale * weight[i];
     }
 }
+
+#if defined(__riscv_vector)
+#include <riscv_vector.h>
+
+#include <cstdlib>
+#include <string_view>
+
+namespace {
+
+#define RVV_NS tensor_rvv_m4
+#define RVV_L m4
+#define RVV_L8 m1
+#include "tensor_rvv.inc"
+#undef RVV_NS
+#undef RVV_L
+#undef RVV_L8
+
+#define RVV_NS tensor_rvv_m2
+#define RVV_L m2
+#define RVV_L8 mf2
+#include "tensor_rvv.inc"
+#undef RVV_NS
+#undef RVV_L
+#undef RVV_L8
+
+// 0 = generic, otherwise the LMUL. Same TT_LAB_MATVEC override as the device-proxy matvec.
+int select_tensor_lmul() {
+    if (const char *env = std::getenv("TT_LAB_MATVEC")) {
+        const std::string_view name(env);
+        if (name == "generic") {
+            return 0;
+        }
+        if (name == "rvv-m4") {
+            return 4;
+        }
+    }
+    return __riscv_vlenb() >= 32 ? 2 : 4;
+}
+
+int tensor_lmul() {
+    static const int lmul = select_tensor_lmul();
+    return lmul;
+}
+
+} // namespace
+
+void matvec_q8_0_rvv(const GgufTensor &matrix, const GgufTensor *bias, const float *input, float *output, int lmul) {
+    const size_t columns = size_t(matrix.shape[0]);
+    const size_t rows = size_t(matrix.shape[1]);
+    const float *bias_values = bias ? (const float *)bias->data : nullptr;
+    if (lmul == 2) {
+        tensor_rvv_m2::matvec_q8_0(matrix.data, columns, rows, bias_values, input, output);
+    } else {
+        tensor_rvv_m4::matvec_q8_0(matrix.data, columns, rows, bias_values, input, output);
+    }
+}
+
+void matvec_q8_0(const GgufTensor &matrix, const float *input, float *output) {
+    const int lmul = tensor_lmul();
+    if (lmul == 0) {
+        return matvec_q8_0_generic(matrix, input, output);
+    }
+    matvec_q8_0_rvv(matrix, nullptr, input, output, lmul);
+}
+
+void matvec_add_q8_0(const GgufTensor &matrix, const GgufTensor &bias, const float *input, float *output) {
+    const int lmul = tensor_lmul();
+    if (lmul == 0) {
+        return matvec_add_q8_0_generic(matrix, bias, input, output);
+    }
+    matvec_q8_0_rvv(matrix, &bias, input, output, lmul);
+}
+
+#endif

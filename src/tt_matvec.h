@@ -19,9 +19,19 @@ void tt_matvec_bfp8(const uint8_t *strip, const uint32_t *b_value_rows, uint32_t
 [[gnu::target("arch=x86-64-v4")]]
 void tt_matvec_bfp8(const uint8_t *strip, const uint32_t *b_value_rows, uint32_t chains[2][16]);
 #else
-// Non-x86 hosts build one generic object; there is no ISA dispatch.
+// Other hosts build one object. On RISC-V with the V extension the entry points dispatch at run time
+// to RVV kernels (LMUL 2 when VLEN >= 256, else 4); TT_LAB_MATVEC=generic|rvv-m4 overrides.
 void tt_matvec_bf16(const uint8_t *tiles, const uint32_t *b_value_rows, size_t k_tiles, uint32_t chains[2][16]);
 void tt_matvec_bfp8(const uint8_t *strip, const uint32_t *b_value_rows, uint32_t chains[2][16]);
+#if defined(__riscv_vector)
+// Individual bodies, for tests and benchmarks. lmul 2 requires VLEN >= 256.
+void tt_matvec_bf16_generic(const uint8_t *tiles, const uint32_t *b_value_rows, size_t k_tiles, uint32_t chains[2][16]);
+void tt_matvec_bfp8_generic(const uint8_t *strip, const uint32_t *b_value_rows, uint32_t chains[2][16]);
+void tt_matvec_bf16_rvv(const uint8_t *tiles, const uint32_t *b_value_rows, size_t k_tiles, uint32_t chains[2][16],
+                        int lmul);
+void tt_matvec_bfp8_rvv(const uint8_t *strip, const uint32_t *b_value_rows, uint32_t chains[2][16], int lmul);
+const char *tt_matvec_kernel_name();
+#endif
 #endif
 
 inline uint16_t dst_decode_bf16_proxy(uint16_t x) {
