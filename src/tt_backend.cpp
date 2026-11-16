@@ -40,6 +40,13 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <unordered_map>
+#include <utility>
+#include <condition_variable>
+#include <deque>
+#include <exception>
+#include <mutex>
+#include <optional>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -687,7 +694,118 @@ uint64_t align_u64(uint64_t value, uint64_t alignment) {
     return (value + alignment - 1) & ~(alignment - 1);
 }
 
+// Parallel host->card preload writes. On hosts where a single core's posted MMIO stores are
+// latency-bound (SpacemiT K3: ~245 MB/s per core, ~1.5 GB/s across 8), weight preload fans
+// DRAM writes out to worker threads. Writes target disjoint DRAM regions, so order between
+// pieces does not matter; drain() is a barrier. TT_LAB_PRELOAD_THREADS overrides the count.
+class PreloadWriter {
+public:
+    using WriteFn = void (*)(uint64_t, const void *, uint32_t);
+    static constexpr uint32_t piece_bytes = 1u << 20;
+
+    PreloadWriter(size_t threads, WriteFn write) : write_(write) {
+        for (size_t i = 0; i < threads; ++i) {
+            workers_.emplace_back([this] { run(); });
+        }
+    }
+    PreloadWriter(const PreloadWriter &) = delete;
+    PreloadWriter &operator=(const PreloadWriter &) = delete;
+    ~PreloadWriter() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stop_ = true;
+        }
+        work_cv_.notify_all();
+        for (auto &worker : workers_) {
+            worker.join();
+        }
+    }
+
+    void submit(uint64_t paddr, const std::byte *src, uint64_t size) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (uint64_t done = 0; done < size;) {
+                const uint32_t piece = uint32_t(std::min<uint64_t>(size - done, piece_bytes));
+                queue_.push_back({paddr + done, src + done, piece});
+                done += piece;
+            }
+        }
+        work_cv_.notify_all();
+    }
+
+    void drain() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        idle_cv_.wait(lock, [this] { return queue_.empty() && busy_ == 0; });
+        if (error_) {
+            std::rethrow_exception(std::exchange(error_, nullptr));
+        }
+    }
+
+private:
+    struct Job {
+        uint64_t paddr;
+        const std::byte *src;
+        uint32_t size;
+    };
+
+    void run() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        for (;;) {
+            work_cv_.wait(lock, [this] { return stop_ || !queue_.empty(); });
+            if (queue_.empty()) {
+                return;
+            }
+            const Job job = queue_.front();
+            queue_.pop_front();
+            ++busy_;
+            lock.unlock();
+            std::exception_ptr failure;
+            try {
+                write_(job.paddr, job.src, job.size);
+            } catch (...) {
+                failure = std::current_exception();
+            }
+            lock.lock();
+            if (failure && !error_) {
+                error_ = failure;
+            }
+            --busy_;
+            if (queue_.empty() && busy_ == 0) {
+                idle_cv_.notify_all();
+            }
+        }
+    }
+
+    WriteFn write_;
+    std::mutex mutex_;
+    std::condition_variable work_cv_;
+    std::condition_variable idle_cv_;
+    std::deque<Job> queue_;
+    size_t busy_ = 0;
+    bool stop_ = false;
+    std::exception_ptr error_;
+    std::vector<std::thread> workers_;
+};
+
+PreloadWriter *active_preload_writer = nullptr;
+
+size_t preload_thread_count() {
+    if (const char *env = std::getenv("TT_LAB_PRELOAD_THREADS")) {
+        const unsigned long n = std::strtoul(env, nullptr, 10);
+        return n ? size_t(n) : 1;
+    }
+#if defined(__x86_64__)
+    return 1;
+#else
+    return std::clamp<size_t>(std::thread::hardware_concurrency(), 1, 8);
+#endif
+}
+
 void write_dram_bytes(TtSimApi &api, uint32_t channel, uint64_t offset, const std::byte *data, uint64_t size) {
+    if (active_preload_writer) {
+        active_preload_writer->submit(dram_addr(channel, offset), data, size);
+        return;
+    }
     constexpr uint64_t chunk_size = 64ull * 1024 * 1024;
     uint64_t copied = 0;
     while (copied < size) {
@@ -854,10 +972,24 @@ void preload_embedding_stripes(TtSimApi &api, TtqTensor &tensor, DramCursor &cur
 
 void preload_tensor_per_chip(TtSimApi &api, TtqTensor &tensor, DramCursor &cursor, TtMeshConfig mesh,
                              const std::byte *data, uint64_t bytes) {
+    // `data` may be a caller temporary: never leave queued writes behind, even on unwind.
+    struct DrainOnUnwind {
+        ~DrainOnUnwind() {
+            if (active_preload_writer && std::uncaught_exceptions()) {
+                try {
+                    active_preload_writer->drain();
+                } catch (...) {
+                }
+            }
+        }
+    } drain_on_unwind;
     for (size_t chip = 0; chip < mesh.chip_count(); ++chip) {
         const DramRegion region = alloc_dram_region(cursor, bytes, 64, chip);
         tensor.chip_regions[chip] = region;
         write_dram_bytes(api, region.channel, region.offset, data, bytes);
+    }
+    if (active_preload_writer) {
+        active_preload_writer->drain();
     }
     tensor.dram_loaded = true;
 }
@@ -989,10 +1121,173 @@ void preload_weight_stripes(TtSimApi &api, TtqTensor &tensor, DramCursor &cursor
     stripe_tensor_to_dram(api, tensor, cursor, mesh, block_bytes, blocks, items, bounds.data());
 }
 
+// TT_LAB_BAR4_BENCH=<MiB>: measure host->card write bandwidth into the BAR4 (write-combining)
+// DRAM window with several store kernels, verify a sample, and exit. Writes card DRAM only.
+#if defined(__riscv)
+__attribute__((noinline)) void bar4_store_rvv_e64m8(volatile uint8_t *dst, const uint8_t *src, size_t size) {
+    while (size) {
+        size_t vl;
+        __asm__ volatile(".option push\n.option arch, +v\n"
+                         "vsetvli %0, %1, e64, m8, ta, ma\n"
+                         "vle64.v v8, (%2)\n"
+                         "vse64.v v8, (%3)\n"
+                         ".option pop\n"
+                         : "=&r"(vl)
+                         : "r"(size / 8), "r"(src), "r"(dst)
+                         : "memory", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15");
+        dst += vl * 8;
+        src += vl * 8;
+        size -= vl * 8;
+    }
+}
+__attribute__((noinline)) void bar4_store_rvv_e64m1(volatile uint8_t *dst, const uint8_t *src, size_t size) {
+    while (size) {
+        size_t vl;
+        __asm__ volatile(".option push\n.option arch, +v\n"
+                         "vsetvli %0, %1, e64, m1, ta, ma\n"
+                         "vle64.v v8, (%2)\n"
+                         "vse64.v v8, (%3)\n"
+                         ".option pop\n"
+                         : "=&r"(vl)
+                         : "r"(size / 8), "r"(src), "r"(dst)
+                         : "memory", "v8");
+        dst += vl * 8;
+        src += vl * 8;
+        size -= vl * 8;
+    }
+}
+size_t rvv_vlenb() {
+    size_t v;
+    __asm__ volatile(".option push\n.option arch, +v\ncsrr %0, vlenb\n.option pop\n" : "=r"(v));
+    return v;
+}
+#endif
+
+__attribute__((noinline)) void bar4_store_u32(volatile uint8_t *dst, const uint8_t *src, size_t size) {
+    auto *d = (volatile uint32_t *)dst;
+    for (size_t i = 0; i < size / 4; ++i) {
+        uint32_t w;
+        std::memcpy(&w, src + i * 4, 4);
+        d[i] = w;
+    }
+}
+
+__attribute__((noinline)) void bar4_store_u64x8(volatile uint8_t *dst, const uint8_t *src, size_t size) {
+    auto *d = (volatile uint64_t *)dst;
+    const auto *s = (const uint64_t *)src;
+    for (size_t i = 0; i < size / 8; i += 8) {
+        const uint64_t a = s[i], b = s[i + 1], c = s[i + 2], e = s[i + 3];
+        const uint64_t f = s[i + 4], g = s[i + 5], h = s[i + 6], k = s[i + 7];
+        d[i] = a; d[i + 1] = b; d[i + 2] = c; d[i + 3] = e;
+        d[i + 4] = f; d[i + 5] = g; d[i + 6] = h; d[i + 7] = k;
+    }
+}
+
+void run_bar4_bench(size_t mib) {
+    const size_t bytes = mib << 20;
+    const size_t chunk = 1u << 20;
+    std::vector<uint8_t> src(bytes);
+    for (size_t i = 0; i < bytes; i += 8) {
+        const uint64_t v = (uint64_t(i) * 0x9E3779B97F4A7C15ull) ^ 0x5555AAAA1234ull;
+        std::memcpy(src.data() + i, &v, 8);
+    }
+    struct Kernel {
+        const char *name;
+        void (*fn)(volatile uint8_t *, const uint8_t *, size_t);
+    };
+    std::vector<Kernel> kernels = {
+        {"copy_to_mmio_wc (current)",
+         [](volatile uint8_t *d, const uint8_t *s, size_t n) { copy_to_mmio_wc(d, s, uint32_t(n)); }},
+        {"u32 stores", bar4_store_u32},
+        {"u64 stores x8 unrolled", bar4_store_u64x8},
+#if defined(__riscv)
+        {"rvv vse64 m1", bar4_store_rvv_e64m1},
+        {"rvv vse64 m8", bar4_store_rvv_e64m8},
+#endif
+    };
+#if defined(__riscv)
+    std::fprintf(stderr, "bar4-bench: VLEN=%zu bits\n", rvv_vlenb() * 8);
+#endif
+    const uint64_t base = dram_addr(0, 1ull << 30);  // channel 0, 1 GiB in
+    for (const Kernel &k : kernels) {
+        for (size_t rep = 0; rep < 2; ++rep) {
+            const auto t0 = std::chrono::steady_clock::now();
+            for (size_t off = 0; off < bytes; off += chunk) {
+                const SiliconAddress a = silicon_pci_mem_ptr(base + off, uint32_t(chunk));
+                k.fn(a.ptr, src.data() + off, chunk);
+                mmio_write_fence();
+            }
+            const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            // Verify 16 sampled 4 KiB blocks.
+            bool ok = true;
+            std::vector<uint8_t> back(4096);
+            for (size_t i = 0; i < 16 && ok; ++i) {
+                const size_t off = (i * (bytes / 16)) & ~size_t(4095);
+                silicon_pci_mem_rd_bytes(base + off, back.data(), 4096);
+                ok = std::memcmp(back.data(), src.data() + off, 4096) == 0;
+            }
+            std::fprintf(stderr, "bar4-bench: %-28s %4zu MiB  %8.1f MB/s  verify=%s\n", k.name, mib,
+                         double(bytes) / sec / 1e6, ok ? "ok" : "FAIL");
+        }
+    }
+    // Parallel stores: each thread writes a disjoint slice with u64x8 stores.
+    for (size_t threads : {2u, 4u, 8u}) {
+        for (size_t rep = 0; rep < 2; ++rep) {
+            const auto t0 = std::chrono::steady_clock::now();
+            std::vector<std::thread> pool;
+            const size_t chunks = bytes / chunk;
+            for (size_t t = 0; t < threads; ++t) {
+                pool.emplace_back([&, t] {
+                    for (size_t c = t; c < chunks; c += threads) {
+                        const size_t off = c * chunk;
+                        const SiliconAddress a = silicon_pci_mem_ptr(base + off, uint32_t(chunk));
+                        bar4_store_u64x8(a.ptr, src.data() + off, chunk);
+                    }
+                    mmio_write_fence();
+                });
+            }
+            for (auto &th : pool) {
+                th.join();
+            }
+            const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            bool ok = true;
+            std::vector<uint8_t> back(4096);
+            for (size_t i = 0; i < 16 && ok; ++i) {
+                const size_t off = (i * (bytes / 16)) & ~size_t(4095);
+                silicon_pci_mem_rd_bytes(base + off, back.data(), 4096);
+                ok = std::memcmp(back.data(), src.data() + off, 4096) == 0;
+            }
+            std::fprintf(stderr, "bar4-bench: u64x8, %zu threads %*s %4zu MiB  %8.1f MB/s  verify=%s\n", threads, 13, "",
+                         mib, double(bytes) / sec / 1e6, ok ? "ok" : "FAIL");
+        }
+    }
+    // Source side: memcpy RAM->RAM for reference.
+    std::vector<uint8_t> dst(bytes);
+    const auto t0 = std::chrono::steady_clock::now();
+    std::memcpy(dst.data(), src.data(), bytes);
+    const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    std::fprintf(stderr, "bar4-bench: host memcpy RAM->RAM          %8.1f MB/s\n", double(bytes) / sec / 1e6);
+}
+
 double preload_ttq_tensors_to_dram(TtSimApi &api, TtqFile &requant, const GgufFile &file, DramCursor &cursor,
                                    TtMeshConfig mesh) {
+    if (const char *bench = std::getenv("TT_LAB_BAR4_BENCH")) {
+        const size_t mib = size_t(std::strtoul(bench, nullptr, 10));
+        run_bar4_bench(mib ? mib : 256);
+        std::exit(0);
+    }
     uint64_t total = 0;
     const auto begin = std::chrono::steady_clock::now();
+
+    std::optional<PreloadWriter> writer;
+    const size_t preload_threads = preload_thread_count();
+    if (preload_threads > 1 && api.pci_mem_wr_bytes == silicon_pci_mem_wr_bytes) {
+        writer.emplace(preload_threads, silicon_pci_mem_wr_bytes);
+        active_preload_writer = &*writer;
+    }
+    struct ClearActiveWriter {
+        ~ClearActiveWriter() { active_preload_writer = nullptr; }
+    } clear_active_writer;
 
     if (mesh.shard_count > 1) {
         for (TtqTensor &tensor : requant.tensors()) {
@@ -1058,6 +1353,9 @@ double preload_ttq_tensors_to_dram(TtSimApi &api, TtqFile &requant, const GgufFi
         total += bytes * mesh.chip_count();
     }
 
+    if (writer) {
+        writer->drain();
+    }
     const auto end = std::chrono::steady_clock::now();
     const double seconds = std::chrono::duration<double>(end - begin).count();
     size_t used_channels = 0;
