@@ -51,6 +51,16 @@ struct TtqRecord {
     uint64_t size;
 };
 
+// Packs rows..rows + 15 of an MXFP4 expert matrix, row_bytes apart, into one BFP8 strip. The scalar form unpacks to
+// floats and calls pack_bfp8_section per section; the x86 forms give the same bytes for every input.
+void pack_mxfp4_bfp8_strip_scalar(const std::byte *rows, size_t row_bytes, uint8_t *strip);
+#if defined(__x86_64__)
+[[gnu::target("default")]]
+void pack_mxfp4_bfp8_strip(const std::byte *rows, size_t row_bytes, uint8_t *strip);
+[[gnu::target("arch=x86-64-v4")]]
+void pack_mxfp4_bfp8_strip(const std::byte *rows, size_t row_bytes, uint8_t *strip);
+#endif
+
 uint16_t fp32_to_bf16(float value);
 uint8_t pack_bfp4_value(float value, uint8_t exponent);
 uint8_t pack_bfp8_value(float value, uint8_t exponent);

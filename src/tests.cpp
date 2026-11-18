@@ -137,6 +137,60 @@ void test_bfp8_packing() {
     }
 }
 
+} // namespace
+
+// The AVX2 and AVX-512 bodies of pack_mxfp4_bfp8_strip by symbol, as tests/host_dispatch.cpp reaches the matvecs; the
+// v4 body is called only behind the CPU capability check.
+extern void bfp8_strip_v3(const std::byte *, size_t, uint8_t *) asm("_Z21pack_mxfp4_bfp8_stripPKSt4bytemPh");
+extern void bfp8_strip_v4(const std::byte *, size_t,
+                          uint8_t *) asm("_Z21pack_mxfp4_bfp8_stripPKSt4bytemPh.arch_x86_64_v4");
+
+namespace {
+
+// The scalar, AVX2 and AVX-512 MXFP4 strips agree on random blocks and on the scales that make subnormal,
+// smallest-normal and infinite values, codes of one magnitude and zero codes, at every source offset mod 64.
+void test_bfp8_strip_isas() {
+    constexpr size_t row_bytes = 2880 / 32 * 17;
+    const bool v4 = __builtin_cpu_supports("x86-64-v4");
+    std::vector<uint8_t> rows(16 * (row_bytes + 1) + 64);
+    std::vector<uint8_t> reference(requant_bfp8_strip_bytes), vector(reference.size());
+    uint32_t random = 7;
+    for (size_t sample = 0; sample < 64; ++sample) {
+        const size_t stride = row_bytes + sample % 2;
+        const std::byte *source = (const std::byte *)rows.data() + sample;
+        for (uint8_t &value : rows) {
+            random ^= random << 13;
+            random ^= random >> 17;
+            random ^= random << 5;
+            value = uint8_t(random);
+        }
+        if (sample < 16) {
+            const uint8_t scales[] = {0, 1, 2, 6, 7, 127, 253, 254, 255};
+            const uint8_t codes[] = {0x00, 0x88, 0x77, 0xff, 0x11, 0x99, 0x07, 0x70};
+            for (size_t row = 0; row < 16; ++row) {
+                for (size_t block = 0; block < row_bytes / 17; ++block) {
+                    uint8_t *data = rows.data() + sample + row * stride + block * 17;
+                    data[0] = scales[(sample + row + block) % sizeof(scales)];
+                    if (sample < 8) {
+                        std::memset(data + 1, codes[sample], 16);
+                    }
+                }
+            }
+        }
+        pack_mxfp4_bfp8_strip_scalar(source, stride, reference.data());
+        bfp8_strip_v3(source, stride, vector.data());
+        if (vector != reference) {
+            throw std::runtime_error("BFP8 strip scalar/v3 mismatch");
+        }
+        if (v4) {
+            bfp8_strip_v4(source, stride, vector.data());
+            if (vector != reference) {
+                throw std::runtime_error("BFP8 strip scalar/v4 mismatch");
+            }
+        }
+    }
+}
+
 void test_f32_matvec_and_norm() {
     const float weights[] = {1, 2, 3, 4};
     const GgufTensor matrix = tensor("f32", {2, 2}, 0, weights);
@@ -185,6 +239,7 @@ int main() {
     try {
         test_float_formats();
         test_shard_bounds();
+        test_bfp8_strip_isas();
         test_bfp4_packing();
         test_bfp8_packing();
         test_f32_matvec_and_norm();

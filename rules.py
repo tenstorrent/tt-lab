@@ -28,13 +28,15 @@ def rules(ctx):
         o_files += [o_file]
 
     matvec_objects = []
+    requant_objects = []
     for isa in ('v3', 'v4'):
-        obj = f'_out/tt_matvec_{isa}.o'
-        ctx.rule(obj, 'src/tt_matvec.cpp',
-                 cmd=['g++', *compile_opts, f'-march=x86-64-{isa}', '-Wno-psabi', '-MMD',
-                      '-c', 'src/tt_matvec.cpp', '-o', obj], depfile=obj.replace('.o', '.d'))
-        matvec_objects.append(obj)
-    o_files += matvec_objects
+        for name, objects in (('tt_matvec', matvec_objects), ('requant_bfp8', requant_objects)):
+            obj = f'_out/{name}_{isa}.o'
+            ctx.rule(obj, f'src/{name}.cpp',
+                     cmd=['g++', *compile_opts, f'-march=x86-64-{isa}', '-Wno-psabi', '-MMD',
+                          '-c', f'src/{name}.cpp', '-o', obj], depfile=obj.replace('.o', '.d'))
+            objects.append(obj)
+    o_files += matvec_objects + requant_objects
 
     target = '_out/tt-lab'
     ctx.rule(target, o_files, cmd=['g++', *compile_opts, *o_files, '-o', target, '-ldl'])
@@ -45,6 +47,7 @@ def rules(ctx):
              depfile='_out/tests.d')
 
     target = '_out/test-core'
+    test_o_files += requant_objects
     ctx.rule(target, test_o_files, cmd=['g++', *compile_opts, *test_o_files, '-o', target])
 
     ctx.rule('_out/host_dispatch.o', 'tests/host_dispatch.cpp',

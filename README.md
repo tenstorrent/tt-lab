@@ -51,8 +51,8 @@ CPU-only use, currently compile and embed the Tenstorrent (TT) firmware and ther
 
 All build output is written under `_out/`; the main binary is `_out/tt-lab`.
 
-The build uses `g++` and GNU++20 and requires x86-64-v3 (including AVX2). CPU tensor kernels and
-device-proxy matvecs automatically use AVX-512 on x86-64-v4 hosts.
+The build uses `g++` and GNU++20 and requires x86-64-v3 (including AVX2). CPU tensor kernels,
+device-proxy matvecs and requant's BFP8 packing automatically use AVX-512 on x86-64-v4 hosts.
 
 Ubuntu 24.04's GCC 13 is tested; newer compilers can generate better AVX-512 code. The TT backend
 firmware build expects SFPI under `~/sfpi-7.76.0` by default; set `SFPI_PATH` to override that
@@ -558,11 +558,11 @@ directory for each run.
 ./make.py :test
 ```
 
-This target needs no model files or hardware. It covers core arithmetic and quantization,
-requant file safety with synthetic fixtures, host ISA dispatch, the SFPU compiler, and the router
-top-four networks. Host dispatch tests compare v3/v4 proxy arithmetic when v4 is available and
-exercise MXFP4 decode and prefill tails on the selected ISA.
-Tests use incremental stamps.
+This target needs no model files or hardware. It covers core arithmetic and quantization
+(including requant's scalar, v3 and v4 BFP8 strips), requant file safety with synthetic fixtures,
+host ISA dispatch, the SFPU compiler, and the router top-four networks. Host dispatch tests compare
+v3/v4 proxy arithmetic when v4 is available and exercise MXFP4 decode and prefill tails on the
+selected ISA. Tests use incremental stamps.
 
 For the additional tokenizer integration checks against the 20b model:
 
