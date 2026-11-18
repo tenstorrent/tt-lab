@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 def rules(ctx):
+    # The bit-exact proxies fuse a multiply and add only where they call std::fma; GNU modes would let GCC fuse others.
     compile_opts = [
-        '-O3', '-std=gnu++20', '-I_out',
+        '-O3', '-std=gnu++20', '-ffp-contract=off', '-I_out',
         '-Wall', '-Wextra', '-Wpedantic', '-Wconversion', '-Wshadow', '-Werror', '-Wno-unused-parameter',
     ]
     if ctx.host.arch == 'x86_64':
