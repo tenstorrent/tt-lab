@@ -370,7 +370,7 @@ double bfp_section_error(const float *values, uint8_t exponent, uint32_t magnitu
         magnitude = std::min(magnitude, max_magnitude);
         const float unpacked = std::signbit(values[i]) ? -scale * float(magnitude) : scale * float(magnitude);
         const double delta = double(unpacked) - double(values[i]);
-        error += delta * delta;
+        error = std::fma(delta, delta, error);
     }
     return error;
 }
