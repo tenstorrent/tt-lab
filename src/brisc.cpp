@@ -14,6 +14,7 @@ static constexpr uint32_t scale_weight_replay = squares_replay + sfpu_squares_bo
 static_assert(scale_weight_replay + sfpu_scale_weight_body_instruction_count <= 32u);
 
 #define NOC_COUNTER_CLEAR 0x060u
+#define NOC_CMD_BUF_AVAIL 0x064u
 #define NOC_COUNTER_BASE 0x200u
 #define NOC_MST_REQS_OUTSTANDING_ID0 16u
 #define NOC_CTRL_RD_NONPOSTED 0x10u
@@ -160,12 +161,27 @@ static void noc_wait_cmd_accepted(uint32_t cmd_buf) {
     }
 }
 
+// A command still in its command FIFO isn't counted yet, and CMD_CTRL doesn't show it.
+static void noc_wait_cmd_fifos_empty() {
+    while (noc_rd(NOC_CMD_BUF_AVAIL) != 0x10101010u) { // 16 free entries in each command buffer's FIFO
+    }
+}
+
+// A trigger into a full command FIFO is dropped.
+static void noc_trigger(uint32_t cmd_buf) {
+    while (!((noc_rd(NOC_CMD_BUF_AVAIL) >> (8u * cmd_buf)) & 0xFFu)) {
+    }
+    noc_wr(noc_cmd_offset(cmd_buf, NOC_CMD_CTRL), 1u);
+}
+
 static void noc_wait_outstanding_id0() {
+    noc_wait_cmd_fifos_empty();
     while (noc_rd(NOC_COUNTER_BASE + NOC_MST_REQS_OUTSTANDING_ID0 * sizeof(uint32_t)) & 0xFFu) {
     }
 }
 
 static void noc_wait_outstanding_id(uint32_t id) {
+    noc_wait_cmd_fifos_empty();
     while (noc_rd(NOC_COUNTER_BASE + (NOC_MST_REQS_OUTSTANDING_ID0 + id) * sizeof(uint32_t)) & 0xFFu) {
     }
 }
@@ -181,7 +197,7 @@ static void noc_read_to_l1_async_id(uint32_t id, uint32_t src_coord, uint32_t sr
     noc_wr(noc_cmd_offset(NOC_READ_CMD_BUF, NOC_RET_ADDR_LO), dst_addr);
     noc_wr(noc_cmd_offset(NOC_READ_CMD_BUF, NOC_PACKET_TAG), id << 10);
     noc_wr(noc_cmd_offset(NOC_READ_CMD_BUF, NOC_AT_LEN_BE), size);
-    noc_wr(noc_cmd_offset(NOC_READ_CMD_BUF, NOC_CMD_CTRL), 1u);
+    noc_trigger(NOC_READ_CMD_BUF);
     noc_wait_cmd_accepted(NOC_READ_CMD_BUF);
 }
 
@@ -201,7 +217,7 @@ static void noc_write_from_l1_async(uint32_t dst_coord, uint32_t dst_addr, uint3
     noc_wr(noc_cmd_offset(NOC_WRITE_CMD_BUF, NOC_RET_ADDR_LO), dst_addr);
     noc_wr(noc_cmd_offset(NOC_WRITE_CMD_BUF, NOC_RET_ADDR_HI), dst_coord);
     noc_wr(noc_cmd_offset(NOC_WRITE_CMD_BUF, NOC_AT_LEN_BE), size);
-    noc_wr(noc_cmd_offset(NOC_WRITE_CMD_BUF, NOC_CMD_CTRL), 1u);
+    noc_trigger(NOC_WRITE_CMD_BUF);
     if constexpr (!Queued) {
         noc_wait_cmd_accepted(NOC_WRITE_CMD_BUF);
     }
@@ -808,7 +824,7 @@ static float rv32f_rsqrt_approx(float x) {
 
 static void allgather_arrive(uint32_t dst_coord) {
     noc_wr(noc_cmd_offset(NOC_ATOMIC_CMD_BUF, NOC_TARG_ADDR_HI), dst_coord);
-    noc_wr(noc_cmd_offset(NOC_ATOMIC_CMD_BUF, NOC_CMD_CTRL), 1u);
+    noc_trigger(NOC_ATOMIC_CMD_BUF);
 }
 
 static void allgather_wait(uint32_t first = 0u, uint32_t count = PHYS_RD32(TT_L1_PEER_COUNT_ADDR)) {
