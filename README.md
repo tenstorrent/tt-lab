@@ -447,10 +447,8 @@ Current mixture-of-experts (MoE) mapping:
 
 ### Simulator Compatibility
 
-The matvec kernels require SrcB broadcast MVMUL (`MVMUL` with `instr_mod19=1`). `ttsim` has
-implemented it since v1.10.10, modeling all four destination rows; older versions report
-`UnimplementedFunctionality`. Build `src/_out/release_bh/libttsim.so` for the one-chip mappings, or
-`src/_out/release_bh_x4/libttsim.so` for the four-chip mapping.
+`ttsim` v1.13.0 or later is required. Build `src/_out/release_bh/libttsim.so` for the one-chip
+mappings, or `src/_out/release_bh_x4/libttsim.so` for the four-chip mapping.
 
 The simulator's standard harvesting and PCIe topology need not match the physical machine;
 four-chip placement follows each backend's translation tables. There is no host command queue: the
