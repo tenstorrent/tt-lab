@@ -255,43 +255,21 @@ uint64_t write_bf16_tensix_payload(std::FILE *output, const GgufTensor &tensor) 
     return tell_file(output) - begin;
 }
 
-void pack_bfp_strip_source_rows(const GgufTensor &tensor, size_t expert, size_t row_base,
-                                std::vector<float> &source_rows) {
-    const size_t rows = size_t(tensor.shape[1]);
-    const size_t src_row_bytes = tensor_row_bytes(tensor);
-
-    source_rows.assign(tile_dim * embedding_length, 0.0f);
-    for (size_t r = 0; r < tile_dim; ++r) {
-        const size_t row_index = row_base + r;
-        const std::byte *source = tensor.data + (expert * rows + row_index) * src_row_bytes;
-        unpack_mxfp4_row(source, source_rows.data() + r * embedding_length);
-    }
-}
-
-void pack_bfp8_strip(const GgufTensor &tensor, size_t expert, size_t row_base, std::vector<uint8_t> &strip) {
-    std::vector<float> source_rows;
-
-    pack_bfp_strip_source_rows(tensor, expert, row_base, source_rows);
-    strip.resize(requant_bfp8_strip_bytes);
-    uint8_t *exponents = strip.data();
-    uint8_t *data = strip.data() + requant_bfp8_strip_exponent_bytes;
-    for (size_t column = 0; column < embedding_length; column += tile_dim) {
-        for (size_t row = 0; row < tile_dim; ++row) {
-            pack_bfp8_section(source_rows.data() + row * embedding_length + column, exponents + column + row,
-                              data + column * tile_dim + row * tile_dim);
-        }
-    }
-}
-
 uint64_t write_bfp8_strip_payload(std::FILE *output, const GgufTensor &tensor) {
     const uint64_t begin = tell_file(output);
     const size_t rows = size_t(tensor.shape[1]);
     const size_t experts = size_t(tensor.shape[2]);
-    std::vector<uint8_t> strip;
+    const size_t row_bytes = tensor_row_bytes(tensor);
+    std::vector<uint8_t> strip(requant_bfp8_strip_bytes);
 
     for (size_t expert = 0; expert < experts; ++expert) {
         for (size_t row_base = 0; row_base < rows; row_base += tile_dim) {
-            pack_bfp8_strip(tensor, expert, row_base, strip);
+            const std::byte *source = tensor.data + (expert * rows + row_base) * row_bytes;
+#if defined(__x86_64__)
+            pack_mxfp4_bfp8_strip(source, row_bytes, strip.data());
+#else
+            pack_mxfp4_bfp8_strip_scalar(source, row_bytes, strip.data());
+#endif
             write_exact(output, strip.data(), strip.size());
         }
     }
@@ -356,6 +334,22 @@ uint8_t pack_bfp4_value(float value, uint8_t exponent) {
 
 uint8_t pack_bfp8_value(float value, uint8_t exponent) {
     return pack_bfp_value(value, exponent, 7);
+}
+
+void pack_mxfp4_bfp8_strip_scalar(const std::byte *rows, size_t row_bytes, uint8_t *strip) {
+    std::vector<float> source_rows(tile_dim * embedding_length);
+
+    for (size_t r = 0; r < tile_dim; ++r) {
+        unpack_mxfp4_row(rows + r * row_bytes, source_rows.data() + r * embedding_length);
+    }
+    uint8_t *exponents = strip;
+    uint8_t *data = strip + requant_bfp8_strip_exponent_bytes;
+    for (size_t column = 0; column < embedding_length; column += tile_dim) {
+        for (size_t row = 0; row < tile_dim; ++row) {
+            pack_bfp8_section(source_rows.data() + row * embedding_length + column, exponents + column + row,
+                              data + column * tile_dim + row * tile_dim);
+        }
+    }
 }
 
 namespace {
