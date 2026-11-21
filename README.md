@@ -55,8 +55,8 @@ The build uses `g++` and GNU++20 and requires x86-64-v3 (including AVX2). CPU te
 device-proxy matvecs and requant's BFP8 packing automatically use AVX-512 on x86-64-v4 hosts.
 
 Ubuntu 24.04's GCC 13 is tested; newer compilers can generate better AVX-512 code. The TT backend
-firmware build expects SFPI under `~/sfpi-7.76.0` by default; set `SFPI_PATH` to override that
-location.
+firmware build expects SFPI under `~/sfpi-7.76.0` by default; pass `--env SFPI_PATH=DIR` to
+`make.py` to override that location.
 
 ### Models
 
@@ -568,7 +568,7 @@ For the additional tokenizer integration checks against the 20b model:
 ./make.py :test-model
 ```
 
-Set `GPT_OSS_TEST_MODEL` if the model is somewhere other than
+Pass `--env GPT_OSS_TEST_MODEL=PATH` if the model is somewhere other than
 `~/models/gpt-oss-20b-MXFP4.gguf`. The integration target requires that file and tracks it as
 a build dependency. It also includes the model-free tests.
 

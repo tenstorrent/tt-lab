@@ -82,7 +82,8 @@ def rules(ctx):
              cmd=['/bin/sh', '-c', '_out/test-core && touch _out/core-test.stamp'], allow_output=True)
     model = ctx.env.get('GPT_OSS_TEST_MODEL', ctx.path.expanduser('~/models/gpt-oss-20b-MXFP4.gguf'))
     ctx.rule('_out/model-test.stamp', ['_out/tt-lab', 'tests/run.sh', model],
-             cmd=['/bin/sh', '-c', 'tests/run.sh && touch _out/model-test.stamp'])
+             cmd=['/usr/bin/env', f'GPT_OSS_TEST_MODEL={model}', '/bin/sh', '-c',
+                  'tests/run.sh && touch _out/model-test.stamp'])
     ctx.rule('_out/sfpu-test.stamp', ['tools/sfpu.py', 'src/kernels.sfpu', 'src/ckernel_ops.h'],
              cmd=['/bin/sh', '-c', 'python3 tools/sfpu.py --self-test && touch _out/sfpu-test.stamp'],
              allow_output=True)
